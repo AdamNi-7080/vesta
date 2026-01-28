@@ -307,6 +307,7 @@ class VestaClimate(ClimateEntity, RestoreEntity):
             )
 
     async def _on_ha_start(self, _event) -> None:
+        self._startup_unsub = None
         await self.async_startup()
 
     async def async_startup(self) -> None:

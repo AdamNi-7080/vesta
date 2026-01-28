@@ -101,12 +101,13 @@ class BoilerCoordinator(DataUpdateCoordinator):
         if self._retry_unsub is not None:
             return
         if self._last_off is None:
-            return
-        remaining = (self._min_cycle * 60) - (
-            dt_util.utcnow() - self._last_off
-        ).total_seconds()
-        if remaining <= 0:
-            return
+            remaining = 30
+        else:
+            remaining = (self._min_cycle * 60) - (
+                dt_util.utcnow() - self._last_off
+            ).total_seconds()
+            if remaining <= 0:
+                return
 
         async def _retry(_now):
             self._retry_unsub = None

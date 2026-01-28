@@ -3,6 +3,10 @@
 ## Unreleased
 - None yet.
 
+## 0.1.14
+- Fix startup boiler retry scheduling when last_off is unknown.
+- Prevent double-unsubscribe on Home Assistant start.
+
 ## 0.1.13
 - Expose preheat status and learned rates in climate attributes.
 
