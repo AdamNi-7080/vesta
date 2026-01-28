@@ -100,12 +100,24 @@ class VestaOptionsFlowHandler(config_entries.OptionsFlow):
             return self.config_entry.options.get(key, self.config_entry.data.get(key))
 
         day_default = _default(CONF_MAINTENANCE_DAY)
-        if isinstance(day_default, str):
-            day_default = MAINTENANCE_DAY_INDEX_BY_NAME.get(
-                day_default.casefold(), DEFAULT_MAINTENANCE_DAY
+        if isinstance(day_default, int):
+            day_default = MAINTENANCE_DAY_BY_INDEX.get(
+                day_default, MAINTENANCE_DAY_BY_INDEX[DEFAULT_MAINTENANCE_DAY]
             )
+        elif isinstance(day_default, str):
+            if day_default.isdigit():
+                day_default = MAINTENANCE_DAY_BY_INDEX.get(
+                    int(day_default), MAINTENANCE_DAY_BY_INDEX[DEFAULT_MAINTENANCE_DAY]
+                )
+            else:
+                day_default = MAINTENANCE_DAY_BY_INDEX.get(
+                    MAINTENANCE_DAY_INDEX_BY_NAME.get(
+                        day_default.casefold(), DEFAULT_MAINTENANCE_DAY
+                    ),
+                    MAINTENANCE_DAY_BY_INDEX[DEFAULT_MAINTENANCE_DAY],
+                )
         if day_default is None:
-            day_default = DEFAULT_MAINTENANCE_DAY
+            day_default = MAINTENANCE_DAY_BY_INDEX[DEFAULT_MAINTENANCE_DAY]
 
         time_default = (
             _default(CONF_MAINTENANCE_TIME) or DEFAULT_MAINTENANCE_TIME
@@ -160,10 +172,7 @@ class VestaOptionsFlowHandler(config_entries.OptionsFlow):
                     default=day_default,
                 ): selector.SelectSelector(
                     selector.SelectSelectorConfig(
-                        options=[
-                            {"label": name, "value": index}
-                            for index, name in MAINTENANCE_DAY_BY_INDEX.items()
-                        ],
+                        options=list(MAINTENANCE_DAY_BY_INDEX.values()),
                         mode=selector.SelectSelectorMode.DROPDOWN,
                     )
                 ),

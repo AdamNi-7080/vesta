@@ -3,6 +3,10 @@
 ## Unreleased
 - None yet.
 
+## 0.1.5
+- Fix startup ordering to avoid climate service errors.
+- Fix options flow day selector values for frontend compatibility.
+
 ## 0.1.4
 - Fix options flow time default serialization for HA frontend.
 

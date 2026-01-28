@@ -44,9 +44,10 @@ async def async_setup_entry(hass: HomeAssistant, entry) -> bool:
 
     coordinator = BoilerCoordinator(hass, entry)
     data["coordinator"] = coordinator
-    await coordinator.async_force_off()
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+
+    await coordinator.async_force_off()
 
     entry.async_on_unload(entry.add_update_listener(async_reload_entry))
 
