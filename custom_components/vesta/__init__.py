@@ -9,6 +9,7 @@ import voluptuous as vol
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import (
     area_registry as ar,
+    device_registry as dr,
     entity_registry as er,
     label_registry as lr,
 )
@@ -58,6 +59,7 @@ async def async_setup_entry(hass: HomeAssistant, entry) -> bool:
 
 def _discover_areas(hass: HomeAssistant, config: dict) -> dict[str, dict]:
     area_reg = ar.async_get(hass)
+    device_reg = dr.async_get(hass)
     entity_reg = er.async_get(hass)
     label_reg = lr.async_get(hass)
     boiler_entity = config.get(CONF_BOILER_ENTITY)
@@ -70,8 +72,13 @@ def _discover_areas(hass: HomeAssistant, config: dict) -> dict[str, dict]:
 
     entities_by_area: dict[str, list[er.RegistryEntry]] = {}
     for entity in entity_reg.entities.values():
-        if entity.area_id:
-            entities_by_area.setdefault(entity.area_id, []).append(entity)
+        area_id = entity.area_id
+        if area_id is None and entity.device_id:
+            device = device_reg.async_get(entity.device_id)
+            if device:
+                area_id = device.area_id
+        if area_id:
+            entities_by_area.setdefault(area_id, []).append(entity)
 
     areas: dict[str, dict] = {}
     for area in area_reg.areas.values():

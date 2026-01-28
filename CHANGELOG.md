@@ -3,6 +3,9 @@
 ## Unreleased
 - None yet.
 
+## 0.1.6
+- Fix area discovery to use device registry area assignments.
+
 ## 0.1.5
 - Fix startup ordering to avoid climate service errors.
 - Fix options flow day selector values for frontend compatibility.
