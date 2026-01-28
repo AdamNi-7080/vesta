@@ -1,0 +1,30 @@
+set_schedule:
+  name: Set schedule target
+  description: Schedule a target temperature for a zone, optionally at a future time for pre-heating.
+  fields:
+    area_id:
+      name: Area ID
+      description: Area registry ID for the target zone.
+      selector:
+        text:
+    area_name:
+      name: Area name
+      description: Human-readable area name for the target zone.
+      selector:
+        text:
+    target:
+      name: Target temperature
+      description: Target temperature in °C.
+      required: true
+      selector:
+        number:
+          min: 5
+          max: 30
+          step: 0.5
+          unit_of_measurement: "°C"
+          mode: slider
+    effective_at:
+      name: Effective time
+      description: ISO 8601 datetime for when the target should take effect.
+      selector:
+        datetime:
