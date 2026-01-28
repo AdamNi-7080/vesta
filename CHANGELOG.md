@@ -3,6 +3,9 @@
 ## Unreleased
 - None yet.
 
+## 0.1.1
+- Fix temperature unit import for newer Home Assistant versions.
+
 ## 0.1.0
 - Initial release.
 - Area discovery for TRVs, sensors, and calendars with `vesta_ignore` label support.
