@@ -3,6 +3,9 @@
 ## Unreleased
 - None yet.
 
+## 0.1.2
+- Fix options flow initialization for Home Assistant.
+
 ## 0.1.1
 - Fix temperature unit import for newer Home Assistant versions.
 
