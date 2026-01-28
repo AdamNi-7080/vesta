@@ -3,6 +3,9 @@
 ## Unreleased
 - None yet.
 
+## 0.1.4
+- Fix options flow time default serialization for HA frontend.
+
 ## 0.1.3
 - Fix options flow creation to use Home Assistant's current handler pattern.
 

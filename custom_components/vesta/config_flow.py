@@ -110,6 +110,16 @@ class VestaOptionsFlowHandler(config_entries.OptionsFlow):
         time_default = (
             _default(CONF_MAINTENANCE_TIME) or DEFAULT_MAINTENANCE_TIME
         )
+        if isinstance(time_default, dict):
+            hour = int(time_default.get("hour", DEFAULT_MAINTENANCE_TIME.hour))
+            minute = int(time_default.get("minute", DEFAULT_MAINTENANCE_TIME.minute))
+            second = int(time_default.get("second", DEFAULT_MAINTENANCE_TIME.second))
+            time_default = f"{hour:02d}:{minute:02d}:{second:02d}"
+        elif hasattr(time_default, "hour"):
+            hour = int(time_default.hour)
+            minute = int(time_default.minute)
+            second = int(getattr(time_default, "second", 0))
+            time_default = f"{hour:02d}:{minute:02d}:{second:02d}"
 
         data_schema = vol.Schema(
             {
