@@ -133,22 +133,10 @@ def _discover_areas(hass: HomeAssistant, config: dict) -> dict[str, dict]:
                     if any(token in entity_id_lower for token in skip_substrings):
                         continue
                     temp_sensors.append(entry.entity_id)
-                elif "distance" in entry.entity_id:
-                    distance_sensors.append(entry.entity_id)
                 elif device_class == "humidity":
                     humidity_sensors.append(entry.entity_id)
-                elif device_class != "battery":
-                    entity_id_lower = entry.entity_id.lower()
-                    if any(term in entity_id_lower for term in ignore_terms):
-                        continue
-                    generic_presence_sensors.append(entry.entity_id)
             elif entry.domain == "binary_sensor" and device_class == "window":
                 window_sensors.append(entry.entity_id)
-            elif entry.domain == "binary_sensor" and device_class in (
-                "presence",
-                "occupancy",
-            ):
-                presence_sensors.append(entry.entity_id)
             elif entry.domain == "calendar":
                 calendar_entities.append(entry.entity_id)
 

@@ -3,6 +3,10 @@
 ## Unreleased
 - None yet.
 
+## 0.1.8
+- Disable presence and proximity discovery (temporary).
+- Apply active calendar events immediately after restart.
+
 ## 0.1.7
 - Add UI strings for config/options flows.
 - Filter noisy diagnostic sensors from generic presence discovery.

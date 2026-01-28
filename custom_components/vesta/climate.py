@@ -683,11 +683,24 @@ class VestaClimate(ClimateEntity, RestoreEntity):
         events = await self._fetch_calendar_events(now, end)
         if not events:
             return
-        next_event = _next_calendar_event(self.hass, now, events)
+        next_event, is_active = _next_calendar_event(self.hass, now, events)
         if not next_event:
             return
         start = _event_start(self.hass, next_event)
-        if start is None or start <= now:
+        if start is None:
+            return
+        end_time = _event_end(self.hass, next_event)
+        if is_active:
+            target = _event_target(next_event)
+            if target is None:
+                return
+            if self._schedule_target != target:
+                _LOGGER.info(
+                    "Found active calendar event: Setting target to %s", target
+                )
+                await self._apply_future_target(target, now)
+            return
+        if start <= now:
             return
         target = _event_target(next_event)
         if target is None:
@@ -1102,17 +1115,51 @@ def _extract_calendar_events(response, entity_id: str | None) -> list[dict]:
     return []
 
 
-def _next_calendar_event(hass, now: dt_util.dt.datetime, events: list[dict]) -> dict | None:
-    best_event = None
-    best_start = None
+def _next_calendar_event(
+    hass, now: dt_util.dt.datetime, events: list[dict]
+) -> tuple[dict | None, bool]:
+    active_event = None
+    active_start = None
+    next_event = None
+    next_start = None
     for event in events:
         start = _event_start(hass, event)
-        if start is None or start <= now:
+        if start is None:
             continue
-        if best_start is None or start < best_start:
-            best_start = start
-            best_event = event
-    return best_event
+        end = _event_end(hass, event)
+        if end is not None and end <= now:
+            continue
+        if start <= now and (end is None or now < end):
+            if active_start is None or start < active_start:
+                active_start = start
+                active_event = event
+            continue
+        if start > now:
+            if next_start is None or start < next_start:
+                next_start = start
+                next_event = event
+    if active_event is not None:
+        return active_event, True
+    return next_event, False
+
+
+def _event_end(hass, event: dict) -> dt_util.dt.datetime | None:
+    if not isinstance(event, dict):
+        return None
+    end = event.get("end")
+    if isinstance(end, dict):
+        end = end.get("dateTime") or end.get("date")
+    if end is None:
+        end = event.get("end_time")
+    dt_value = _parse_effective_at(hass, end)
+    if dt_value is not None:
+        return dt_value
+    date_value = dt_util.parse_date(str(end)) if end is not None else None
+    if date_value is None:
+        return None
+    tz = dt_util.get_time_zone(hass.config.time_zone)
+    dt_value = datetime.combine(date_value, datetime.min.time()).replace(tzinfo=tz)
+    return dt_util.as_utc(dt_value)
 
 
 def _event_start(hass, event: dict) -> dt_util.dt.datetime | None:
