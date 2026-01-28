@@ -3,6 +3,9 @@
 ## Unreleased
 - None yet.
 
+## 0.1.3
+- Fix options flow creation to use Home Assistant's current handler pattern.
+
 ## 0.1.2
 - Fix options flow initialization for Home Assistant.
 

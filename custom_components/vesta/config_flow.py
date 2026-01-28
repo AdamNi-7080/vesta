@@ -33,7 +33,7 @@ class VestaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     @staticmethod
     def async_get_options_flow(config_entry):
-        return VestaOptionsFlowHandler(config_entry)
+        return VestaOptionsFlowHandler()
 
     async def async_step_user(self, user_input=None):
         """Handle the initial step."""
@@ -85,9 +85,6 @@ class VestaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
 class VestaOptionsFlowHandler(config_entries.OptionsFlow):
     """Handle Vesta options flow."""
-
-    def __init__(self, config_entry):
-        super().__init__(config_entry)
 
     async def async_step_init(self, user_input=None):
         """Manage the options."""
