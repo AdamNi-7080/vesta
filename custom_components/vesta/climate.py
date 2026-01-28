@@ -250,9 +250,15 @@ class VestaClimate(ClimateEntity, RestoreEntity):
             "vesta_battery_sensors": list(self._battery_sensors),
             "vesta_calendar_entity": self._calendar_entity,
             "vesta_health": self._health_state,
+            "vesta_heating_rate": self._learning.get_rate(
+                self._zone_id, self._get_outdoor_temp(), self._is_sunny()
+            ),
             "vesta_cooling_rate": self._learning.get_cooling_rate(
                 self._zone_id, self._get_outdoor_temp(), self._is_sunny()
             ),
+            "vesta_next_schedule_time": self._pending_effective_at,
+            "vesta_next_schedule_target": self._pending_target,
+            "vesta_is_preheating": self._preheat_active,
         }
 
     def _fire_event(self, event_type: str, data: dict | None = None) -> None:
@@ -1023,7 +1029,7 @@ class VestaClimate(ClimateEntity, RestoreEntity):
                     "climate",
                     SERVICE_SET_HVAC_MODE,
                     {ATTR_ENTITY_ID: valid_trvs, "hvac_mode": HVACMode.OFF},
-                    blocking=False,
+                    blocking=True,
                 )
                 await self.hass.services.async_call(
                     "climate",
@@ -1032,7 +1038,7 @@ class VestaClimate(ClimateEntity, RestoreEntity):
                         ATTR_ENTITY_ID: valid_trvs,
                         ATTR_TEMPERATURE: self._off_temp,
                     },
-                    blocking=False,
+                    blocking=True,
                 )
             elif target is not None:
                 send_target = target
@@ -1051,13 +1057,13 @@ class VestaClimate(ClimateEntity, RestoreEntity):
                     "climate",
                     SERVICE_SET_HVAC_MODE,
                     {ATTR_ENTITY_ID: valid_trvs, "hvac_mode": HVACMode.HEAT},
-                    blocking=False,
+                    blocking=True,
                 )
                 await self.hass.services.async_call(
                     "climate",
                     SERVICE_SET_TEMPERATURE,
                     {ATTR_ENTITY_ID: valid_trvs, ATTR_TEMPERATURE: send_target},
-                    blocking=False,
+                    blocking=True,
                 )
 
         await self._update_demand(target)
@@ -1074,13 +1080,13 @@ class VestaClimate(ClimateEntity, RestoreEntity):
             "climate",
             SERVICE_SET_HVAC_MODE,
             {ATTR_ENTITY_ID: valid_trvs, "hvac_mode": HVACMode.HEAT},
-            blocking=False,
+            blocking=True,
         )
         await self.hass.services.async_call(
             "climate",
             SERVICE_SET_TEMPERATURE,
             {ATTR_ENTITY_ID: valid_trvs, ATTR_TEMPERATURE: temperature},
-            blocking=False,
+            blocking=True,
         )
 
     async def _update_demand(self, target: float | None) -> None:

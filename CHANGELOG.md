@@ -3,6 +3,9 @@
 ## Unreleased
 - None yet.
 
+## 0.1.13
+- Expose preheat status and learned rates in climate attributes.
+
 ## 0.1.12
 - Add device triggers for preheat, window, and failure events.
 

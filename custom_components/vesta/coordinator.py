@@ -15,6 +15,7 @@ from homeassistant.const import (
     ATTR_ENTITY_ID,
     ATTR_TEMPERATURE,
     STATE_OFF,
+    STATE_ON,
     STATE_UNAVAILABLE,
     STATE_UNKNOWN,
 )
@@ -43,10 +44,11 @@ class BoilerCoordinator(DataUpdateCoordinator):
 
     def __init__(self, hass: HomeAssistant, entry):
         super().__init__(hass, _LOGGER, name="vesta_boiler")
-        self._boiler_entity = entry.data[CONF_BOILER_ENTITY]
-        self._boost_temp = entry.data.get(CONF_BOOST_TEMP, DEFAULT_BOOST_TEMP)
-        self._off_temp = entry.data.get(CONF_OFF_TEMP, DEFAULT_OFF_TEMP)
-        self._min_cycle = entry.data.get(CONF_MIN_CYCLE, DEFAULT_MIN_CYCLE)
+        config = {**entry.data, **entry.options}
+        self._boiler_entity = config[CONF_BOILER_ENTITY]
+        self._boost_temp = config.get(CONF_BOOST_TEMP, DEFAULT_BOOST_TEMP)
+        self._off_temp = config.get(CONF_OFF_TEMP, DEFAULT_OFF_TEMP)
+        self._min_cycle = config.get(CONF_MIN_CYCLE, DEFAULT_MIN_CYCLE)
         self._demand: dict[str, bool] = {}
         self._last_off: dt_util.dt.datetime | None = None
         self._boiler_on = False
@@ -117,8 +119,6 @@ class BoilerCoordinator(DataUpdateCoordinator):
         await self._turn_boiler_off(force=True)
 
     async def _turn_boiler_on(self) -> None:
-        if self._boiler_on:
-            return
         domain = self._boiler_entity.split(".", 1)[0]
         state = self.hass.states.get(self._boiler_entity)
         if state is None or state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
@@ -128,6 +128,22 @@ class BoilerCoordinator(DataUpdateCoordinator):
             )
             self._schedule_retry()
             return
+        if self._boiler_on:
+            if domain == "climate":
+                current_temp = state.attributes.get(ATTR_TEMPERATURE)
+                try:
+                    current_temp = float(current_temp)
+                except (TypeError, ValueError):
+                    current_temp = None
+                if (
+                    state.state == HVACMode.HEAT
+                    and current_temp is not None
+                    and abs(current_temp - self._boost_temp) < 0.1
+                ):
+                    return
+            else:
+                if state.state == STATE_ON:
+                    return
         if domain == "climate":
             if not self.hass.services.has_service("climate", SERVICE_SET_TEMPERATURE):
                 _LOGGER.warning(
@@ -139,7 +155,7 @@ class BoilerCoordinator(DataUpdateCoordinator):
                     "climate",
                     SERVICE_SET_HVAC_MODE,
                     {ATTR_ENTITY_ID: self._boiler_entity, "hvac_mode": HVACMode.HEAT},
-                    blocking=False,
+                    blocking=True,
                 )
             await self.hass.services.async_call(
                 "climate",
@@ -148,14 +164,14 @@ class BoilerCoordinator(DataUpdateCoordinator):
                     ATTR_ENTITY_ID: self._boiler_entity,
                     ATTR_TEMPERATURE: self._boost_temp,
                 },
-                blocking=False,
+                blocking=True,
             )
         else:
             await self.hass.services.async_call(
                 domain,
                 "turn_on",
                 {ATTR_ENTITY_ID: self._boiler_entity},
-                blocking=False,
+                blocking=True,
             )
         self._boiler_on = True
 
@@ -187,7 +203,7 @@ class BoilerCoordinator(DataUpdateCoordinator):
                         "climate",
                         SERVICE_SET_HVAC_MODE,
                         {ATTR_ENTITY_ID: self._boiler_entity, "hvac_mode": HVACMode.OFF},
-                        blocking=False,
+                        blocking=True,
                     )
             await self.hass.services.async_call(
                 "climate",
@@ -196,14 +212,14 @@ class BoilerCoordinator(DataUpdateCoordinator):
                     ATTR_ENTITY_ID: self._boiler_entity,
                     ATTR_TEMPERATURE: self._off_temp,
                 },
-                blocking=False,
+                blocking=True,
             )
         else:
             await self.hass.services.async_call(
                 domain,
                 "turn_off",
                 {ATTR_ENTITY_ID: self._boiler_entity},
-                blocking=False,
+                blocking=True,
             )
         self._boiler_on = False
         self._last_off = dt_util.utcnow()

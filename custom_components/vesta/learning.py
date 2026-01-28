@@ -109,7 +109,7 @@ class VestaLearning:
             return
         duration = dt_util.utcnow() - cycle.start_time
         hours = duration.total_seconds() / 3600
-        if hours <= 0:
+        if hours <= 0.25:
             return
         delta = end_temp - cycle.start_temp
         if delta <= 0:
@@ -142,7 +142,7 @@ class VestaLearning:
             return
         duration = dt_util.utcnow() - cycle.start_time
         hours = duration.total_seconds() / 3600
-        if hours <= 0:
+        if hours <= 0.25:
             return
         delta = cycle.start_temp - end_temp
         if delta <= 0:
