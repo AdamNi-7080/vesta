@@ -120,6 +120,14 @@ class BoilerCoordinator(DataUpdateCoordinator):
         if self._boiler_on:
             return
         domain = self._boiler_entity.split(".", 1)[0]
+        state = self.hass.states.get(self._boiler_entity)
+        if state is None or state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
+            _LOGGER.warning(
+                "Boiler entity %s unavailable; scheduling retry",
+                self._boiler_entity,
+            )
+            self._schedule_retry()
+            return
         if domain == "climate":
             if not self.hass.services.has_service("climate", SERVICE_SET_TEMPERATURE):
                 _LOGGER.warning(
@@ -155,6 +163,14 @@ class BoilerCoordinator(DataUpdateCoordinator):
         if not self._boiler_on and not force:
             return
         domain = self._boiler_entity.split(".", 1)[0]
+        state = self.hass.states.get(self._boiler_entity)
+        if state is None or state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
+            _LOGGER.warning(
+                "Boiler entity %s unavailable; scheduling retry",
+                self._boiler_entity,
+            )
+            self._schedule_retry()
+            return
         if domain == "climate":
             if not self.hass.services.has_service("climate", SERVICE_SET_TEMPERATURE):
                 _LOGGER.warning(

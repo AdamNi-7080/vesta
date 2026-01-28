@@ -4,6 +4,11 @@ from datetime import time
 
 DOMAIN = "vesta"
 
+DOMAIN_EVENT = "vesta_event"
+TYPE_PREHEAT = "preheat_started"
+TYPE_WINDOW = "window_detected"
+TYPE_FAILURE = "failure_detected"
+
 CONF_BOILER_ENTITY = "boiler_entity"
 CONF_BOOST_TEMP = "boost_temp"
 CONF_COMFORT_TEMP = "comfort_temp"

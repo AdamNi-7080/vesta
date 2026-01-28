@@ -3,6 +3,9 @@
 ## Unreleased
 - None yet.
 
+## 0.1.12
+- Add device triggers for preheat, window, and failure events.
+
 ## 0.1.11
 - Add configurable comfort temperature and use it as schedule fallback.
 - Safe calendar polling and default schedule/eco values on startup.

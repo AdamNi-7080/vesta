@@ -19,6 +19,9 @@ from homeassistant.components.climate.const import (
 from homeassistant.const import (
     ATTR_ENTITY_ID,
     ATTR_TEMPERATURE,
+    CONF_DEVICE_ID,
+    CONF_TYPE,
+    EVENT_HOMEASSISTANT_START,
     STATE_HOME,
     STATE_ON,
     STATE_OFF,
@@ -26,6 +29,8 @@ from homeassistant.const import (
     STATE_UNKNOWN,
     UnitOfTemperature,
 )
+from homeassistant.helpers import device_registry as dr
+from homeassistant.core import CoreState
 from homeassistant.helpers.event import (
     async_call_later,
     async_track_state_change_event,
@@ -53,8 +58,12 @@ from .const import (
     DEFAULT_VALVE_MAINTENANCE,
     DEFAULT_WINDOW_THRESHOLD,
     DOMAIN,
+    DOMAIN_EVENT,
     EVENT_SCHEDULE_UPDATE,
     MAINTENANCE_DAY_INDEX_BY_NAME,
+    TYPE_FAILURE,
+    TYPE_PREHEAT,
+    TYPE_WINDOW,
 )
 
 BOOST_DURATION = timedelta(minutes=90)
@@ -98,6 +107,16 @@ class VestaClimate(ClimateEntity, RestoreEntity):
     _attr_temperature_unit = UnitOfTemperature.CELSIUS
     _attr_target_temperature_step = 0.5
     _attr_should_poll = False
+
+    @property
+    def device_info(self):
+        return {
+            "identifiers": {(DOMAIN, self._zone_id)},
+            "name": f"{self._area_name} Vesta",
+            "manufacturer": "Vesta Community",
+            "model": "Virtual Thermostat",
+            "suggested_area": self._area_name,
+        }
 
     def __init__(self, hass, area: dict, coordinator, learning, config: dict):
         self.hass = hass
@@ -184,6 +203,9 @@ class VestaClimate(ClimateEntity, RestoreEntity):
         self._idle_since: dt_util.dt.datetime | None = None
         self._idle_start_temp: float | None = None
         self._last_trv_warning: dt_util.dt.datetime | None = None
+        self._retry_unsub = None
+        self._startup_unsub = None
+        self._startup_done = False
 
         self._unsubs: list[callable] = []
 
@@ -233,15 +255,21 @@ class VestaClimate(ClimateEntity, RestoreEntity):
             ),
         }
 
+    def _fire_event(self, event_type: str, data: dict | None = None) -> None:
+        device_reg = dr.async_get(self.hass)
+        device = device_reg.async_get_device(identifiers={(DOMAIN, self._zone_id)})
+        payload = {
+            CONF_TYPE: event_type,
+            "entity_id": self.entity_id,
+        }
+        if device:
+            payload[CONF_DEVICE_ID] = device.id
+        if data:
+            payload.update(data)
+        self.hass.bus.async_fire(DOMAIN_EVENT, payload)
+
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
-        await self._load_schedule_target()
-        self._refresh_presence()
-        self._refresh_window_state()
-        await self._refresh_battery_state()
-        await self._update_current_temperature()
-        await self._update_current_humidity()
-
         self._unsubs.append(
             self.hass.bus.async_listen(EVENT_SCHEDULE_UPDATE, self._handle_schedule)
         )
@@ -262,6 +290,33 @@ class VestaClimate(ClimateEntity, RestoreEntity):
                     self.hass, list(tracked), self._handle_state_change
                 )
             )
+
+        if self.hass.state == CoreState.running:
+            await self.async_startup()
+        else:
+            if self._startup_unsub:
+                self._startup_unsub()
+            self._startup_unsub = self.hass.bus.async_listen_once(
+                EVENT_HOMEASSISTANT_START, self._on_ha_start
+            )
+
+    async def _on_ha_start(self, _event) -> None:
+        await self.async_startup()
+
+    async def async_startup(self) -> None:
+        if self._startup_done:
+            return
+        self._startup_done = True
+        if self._startup_unsub:
+            self._startup_unsub()
+            self._startup_unsub = None
+
+        await self._load_schedule_target()
+        self._refresh_presence()
+        self._refresh_window_state()
+        await self._refresh_battery_state()
+        await self._update_current_temperature()
+        await self._update_current_humidity()
 
         if self._calendar_entity:
             await self._poll_calendar(None)
@@ -292,9 +347,15 @@ class VestaClimate(ClimateEntity, RestoreEntity):
         if self._boost_unsub:
             self._boost_unsub()
             self._boost_unsub = None
+        if self._retry_unsub:
+            self._retry_unsub()
+            self._retry_unsub = None
         if self._window_hold_unsub:
             self._window_hold_unsub()
             self._window_hold_unsub = None
+        if self._startup_unsub:
+            self._startup_unsub()
+            self._startup_unsub = None
         self._cancel_preheat()
         if self._maintenance_task:
             self._maintenance_task.cancel()
@@ -464,6 +525,7 @@ class VestaClimate(ClimateEntity, RestoreEntity):
         self._window_hold_unsub = async_call_later(
             self.hass, WINDOW_HOLD_DURATION.total_seconds(), _clear_hold
         )
+        self._fire_event(TYPE_WINDOW)
 
     def _refresh_window_state(self) -> None:
         self._window_open = any(
@@ -787,6 +849,7 @@ class VestaClimate(ClimateEntity, RestoreEntity):
         self._preheat_active = True
         self._preheat_target = target
         self._preheat_effective_at = effective_at
+        self._fire_event(TYPE_PREHEAT, {"target": target})
         await self._apply_output()
 
     async def _apply_future_target(
@@ -892,6 +955,16 @@ class VestaClimate(ClimateEntity, RestoreEntity):
             )
             self._last_trv_warning = now
 
+    def _schedule_apply_retry(self) -> None:
+        if self._retry_unsub:
+            return
+
+        async def _retry(_now):
+            self._retry_unsub = None
+            await self._apply_output()
+
+        self._retry_unsub = async_call_later(self.hass, 30, _retry)
+
     def _maintenance_time_args(self) -> dict[str, int]:
         value = self._maintenance_time
         if isinstance(value, str):
@@ -938,9 +1011,13 @@ class VestaClimate(ClimateEntity, RestoreEntity):
         if self._trvs:
             if not valid_trvs:
                 self._warn_no_trvs()
+                self._schedule_apply_retry()
                 await self._update_demand(target)
                 self.async_write_ha_state()
                 return
+            if self._retry_unsub:
+                self._retry_unsub()
+                self._retry_unsub = None
             if forced_off:
                 await self.hass.services.async_call(
                     "climate",
@@ -1090,6 +1167,8 @@ class VestaClimate(ClimateEntity, RestoreEntity):
 
         if health != self._health_state:
             self._health_state = health
+            if health != "OK":
+                self._fire_event(TYPE_FAILURE, {"status": health})
             self.async_write_ha_state()
 
 

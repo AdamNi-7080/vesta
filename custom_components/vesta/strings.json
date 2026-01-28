@@ -63,5 +63,12 @@
       "missing": "Please fill in all fields."
     },
     "abort": {}
+  },
+  "device_automation": {
+    "trigger_type": {
+      "preheat_started": "Vesta starts pre-heating",
+      "window_detected": "Open window detected",
+      "failure_detected": "Critical system failure detected"
+    }
   }
 }
