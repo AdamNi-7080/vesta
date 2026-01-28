@@ -684,8 +684,15 @@ class VestaClimate(ClimateEntity, RestoreEntity):
         if self._battery_lock:
             return
         now = dt_util.utcnow()
+        start_search = now - timedelta(hours=24)
         end = now + timedelta(days=7)
-        events = await self._fetch_calendar_events(now, end)
+        events = await self._fetch_calendar_events(start_search, end)
+        _LOGGER.debug(
+            "Calendar fetch: %s events found between %s and %s",
+            len(events),
+            start_search,
+            end,
+        )
         if not events:
             return
         next_event, is_active = _next_calendar_event(self.hass, now, events)

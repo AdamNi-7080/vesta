@@ -3,6 +3,9 @@
 ## Unreleased
 - None yet.
 
+## 0.1.10
+- Expand calendar fetch window to include recent past events.
+
 ## 0.1.9
 - Fix home/away detection for zone.home numeric state.
 
