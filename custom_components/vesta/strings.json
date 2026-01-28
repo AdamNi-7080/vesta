@@ -1,0 +1,65 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Vesta Heating",
+        "data": {
+          "boiler_entity": "Boiler Switch Entity",
+          "weather_entity": "Weather Provider",
+          "boost_temp": "Boost Temperature",
+          "min_cycle": "Minimum Boiler Cycle",
+          "valve_maintenance": "Valve Maintenance",
+          "bermuda_threshold": "Proximity Threshold"
+        },
+        "data_description": {
+          "boiler_entity": "The switch that controls your boiler relay.",
+          "weather_entity": "Used for outdoor temperature and solar gain calculations.",
+          "boost_temp": "Default temperature for manual boosts.",
+          "min_cycle": "Minimum time (minutes) the boiler must run to prevent short-cycling.",
+          "valve_maintenance": "Enable weekly exercise to prevent valves seizing.",
+          "bermuda_threshold": "Distance (meters) for Bermuda/Proximity pre-heating."
+        }
+      }
+    },
+    "error": {
+      "missing": "Please fill in all fields.",
+      "no_available_boiler": "No available boiler entities found."
+    },
+    "abort": {}
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Vesta Options",
+        "data": {
+          "min_cycle": "Minimum Boiler Cycle",
+          "off_temp": "Frost Protection Temp",
+          "eco_temp": "Away/Eco Temp",
+          "boost_temp": "Boost Temperature",
+          "window_threshold": "Window Drop Threshold",
+          "bermuda_threshold": "Proximity Threshold",
+          "valve_maintenance": "Valve Maintenance",
+          "maintenance_time": "Maintenance Time",
+          "maintenance_day": "Maintenance Day",
+          "weather_entity": "Weather Provider"
+        },
+        "data_description": {
+          "min_cycle": "Minimum time (minutes) the boiler must run to prevent short-cycling.",
+          "off_temp": "Temperature to maintain when heating is OFF.",
+          "eco_temp": "Default temperature when house is empty.",
+          "boost_temp": "Default temperature for manual boosts.",
+          "window_threshold": "Degrees drop per minute to trigger open window detection.",
+          "bermuda_threshold": "Distance (meters) for Bermuda/Proximity pre-heating.",
+          "valve_maintenance": "Enable weekly exercise to prevent valves seizing.",
+          "maintenance_time": "Time of day to run valve exercise.",
+          "maintenance_day": "Day of week to run valve exercise.",
+          "weather_entity": "Used for outdoor temperature and solar gain calculations."
+        }
+      }
+    },
+    "error": {
+      "missing": "Please fill in all fields."
+    },
+    "abort": {}
+  }
+}

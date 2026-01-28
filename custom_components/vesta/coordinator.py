@@ -121,12 +121,18 @@ class BoilerCoordinator(DataUpdateCoordinator):
             return
         domain = self._boiler_entity.split(".", 1)[0]
         if domain == "climate":
-            await self.hass.services.async_call(
-                "climate",
-                SERVICE_SET_HVAC_MODE,
-                {ATTR_ENTITY_ID: self._boiler_entity, "hvac_mode": HVACMode.HEAT},
-                blocking=False,
-            )
+            if not self.hass.services.has_service("climate", SERVICE_SET_TEMPERATURE):
+                _LOGGER.warning(
+                    "Climate service set_temperature unavailable; skipping boiler on"
+                )
+                return
+            if self.hass.services.has_service("climate", SERVICE_SET_HVAC_MODE):
+                await self.hass.services.async_call(
+                    "climate",
+                    SERVICE_SET_HVAC_MODE,
+                    {ATTR_ENTITY_ID: self._boiler_entity, "hvac_mode": HVACMode.HEAT},
+                    blocking=False,
+                )
             await self.hass.services.async_call(
                 "climate",
                 SERVICE_SET_TEMPERATURE,
@@ -150,17 +156,23 @@ class BoilerCoordinator(DataUpdateCoordinator):
             return
         domain = self._boiler_entity.split(".", 1)[0]
         if domain == "climate":
+            if not self.hass.services.has_service("climate", SERVICE_SET_TEMPERATURE):
+                _LOGGER.warning(
+                    "Climate service set_temperature unavailable; skipping boiler off"
+                )
+                return
             state = self.hass.states.get(self._boiler_entity)
             hvac_modes = []
             if state is not None:
                 hvac_modes = state.attributes.get(ATTR_HVAC_MODES, [])
             if HVACMode.OFF in hvac_modes:
-                await self.hass.services.async_call(
-                    "climate",
-                    SERVICE_SET_HVAC_MODE,
-                    {ATTR_ENTITY_ID: self._boiler_entity, "hvac_mode": HVACMode.OFF},
-                    blocking=False,
-                )
+                if self.hass.services.has_service("climate", SERVICE_SET_HVAC_MODE):
+                    await self.hass.services.async_call(
+                        "climate",
+                        SERVICE_SET_HVAC_MODE,
+                        {ATTR_ENTITY_ID: self._boiler_entity, "hvac_mode": HVACMode.OFF},
+                        blocking=False,
+                    )
             await self.hass.services.async_call(
                 "climate",
                 SERVICE_SET_TEMPERATURE,

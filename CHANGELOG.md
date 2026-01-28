@@ -3,6 +3,12 @@
 ## Unreleased
 - None yet.
 
+## 0.1.7
+- Add UI strings for config/options flows.
+- Filter noisy diagnostic sensors from generic presence discovery.
+- Expose calendar entity attribute and log calendar discovery.
+- Fallback to TRV temperature if external sensors are unavailable.
+
 ## 0.1.6
 - Fix area discovery to use device registry area assignments.
 

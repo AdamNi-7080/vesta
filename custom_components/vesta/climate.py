@@ -224,6 +224,7 @@ class VestaClimate(ClimateEntity, RestoreEntity):
             "vesta_window_sensors": list(self._window_sensors),
             "vesta_presence_sensors": list(presence_sources),
             "vesta_battery_sensors": list(self._battery_sensors),
+            "vesta_calendar_entity": self._calendar_entity,
             "vesta_health": self._health_state,
             "vesta_cooling_rate": self._learning.get_cooling_rate(
                 self._zone_id, self._get_outdoor_temp(), self._is_sunny()
@@ -394,7 +395,7 @@ class VestaClimate(ClimateEntity, RestoreEntity):
                 temp = _state_to_float(self.hass.states.get(entity_id))
                 if temp is not None:
                     temps.append(temp)
-        else:
+        if not temps and self._trvs:
             for entity_id in self._trvs:
                 state = self.hass.states.get(entity_id)
                 if state is None:

@@ -64,6 +64,23 @@ def _discover_areas(hass: HomeAssistant, config: dict) -> dict[str, dict]:
     label_reg = lr.async_get(hass)
     boiler_entity = config.get(CONF_BOILER_ENTITY)
     skip_substrings = ("cpu", "processor", "chip", "battery", "device", "internal")
+    ignore_terms = [
+        "linkquality",
+        "rssi",
+        "signal",
+        "uptime",
+        "voltage",
+        "current",
+        "power",
+        "energy",
+        "consumption",
+        "version",
+        "update",
+        "steps",
+        "limit",
+        "id",
+        "status",
+    ]
     ignore_label_ids = {
         label_id
         for label_id, label in label_reg.labels.items()
@@ -121,6 +138,9 @@ def _discover_areas(hass: HomeAssistant, config: dict) -> dict[str, dict]:
                 elif device_class == "humidity":
                     humidity_sensors.append(entry.entity_id)
                 elif device_class != "battery":
+                    entity_id_lower = entry.entity_id.lower()
+                    if any(term in entity_id_lower for term in ignore_terms):
+                        continue
                     generic_presence_sensors.append(entry.entity_id)
             elif entry.domain == "binary_sensor" and device_class == "window":
                 window_sensors.append(entry.entity_id)
@@ -145,6 +165,8 @@ def _discover_areas(hass: HomeAssistant, config: dict) -> dict[str, dict]:
 
         if not climate_entities:
             continue
+
+        _LOGGER.debug("Area %s: Found calendar %s", area.name, calendar_entities)
 
         areas[area.id] = {
             "id": area.id,
