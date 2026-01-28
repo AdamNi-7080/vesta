@@ -3,6 +3,9 @@
 ## Unreleased
 - None yet.
 
+## 0.1.9
+- Fix home/away detection for zone.home numeric state.
+
 ## 0.1.8
 - Disable presence and proximity discovery (temporary).
 - Apply active calendar events immediately after restart.

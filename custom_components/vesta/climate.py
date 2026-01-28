@@ -563,7 +563,12 @@ class VestaClimate(ClimateEntity, RestoreEntity):
 
     def _is_home(self) -> bool:
         state = self.hass.states.get(HOME_ZONE)
-        return state is not None and state.state == STATE_HOME
+        if state is None or state.state in (STATE_UNKNOWN, STATE_UNAVAILABLE):
+            return False
+        try:
+            return int(float(state.state)) > 0
+        except (TypeError, ValueError):
+            return False
 
     def _is_guest_mode(self) -> bool:
         state = self.hass.states.get(GUEST_SWITCH)
