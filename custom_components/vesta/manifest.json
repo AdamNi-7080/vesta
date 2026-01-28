@@ -5,7 +5,6 @@
   "documentation": "https://github.com/AdamNi-7080/vesta",
   "issue_tracker": "https://github.com/AdamNi-7080/vesta/issues",
   "codeowners": ["@AdamNi-7080"],
-  "homeassistant": "2024.1.0",
   "config_flow": true,
   "iot_class": "local_push",
   "dependencies": ["calendar"],
