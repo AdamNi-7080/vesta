@@ -36,6 +36,7 @@ from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.util import dt as dt_util
 
 from .const import (
+    CONF_COMFORT_TEMP,
     CONF_MAINTENANCE_DAY,
     CONF_MAINTENANCE_TIME,
     CONF_OFF_TEMP,
@@ -116,6 +117,7 @@ class VestaClimate(ClimateEntity, RestoreEntity):
         self._weather_entity = config.get(CONF_WEATHER_ENTITY)
         self._calendar_entity = area.get("calendar_entity")
         self._off_temp = config.get(CONF_OFF_TEMP, DEFAULT_OFF_TEMP)
+        self._comfort_temp = config.get(CONF_COMFORT_TEMP, DEFAULT_COMFORT_TEMP)
         self._window_threshold = config.get(
             CONF_WINDOW_THRESHOLD, DEFAULT_WINDOW_THRESHOLD
         )
@@ -384,8 +386,10 @@ class VestaClimate(ClimateEntity, RestoreEntity):
         if state and state.state not in (STATE_UNKNOWN, STATE_UNAVAILABLE):
             try:
                 self._schedule_target = float(state.state)
+                return
             except ValueError:
-                self._schedule_target = None
+                pass
+        self._schedule_target = self._comfort_temp
 
     async def _update_current_temperature(self) -> None:
         temps: list[float] = []
@@ -611,7 +615,7 @@ class VestaClimate(ClimateEntity, RestoreEntity):
             and self._presence_on
             and schedule_target <= self._off_temp
         ):
-            schedule_target = max(schedule_target, DEFAULT_COMFORT_TEMP)
+            schedule_target = max(schedule_target, self._comfort_temp)
 
         return schedule_target
 
@@ -680,6 +684,9 @@ class VestaClimate(ClimateEntity, RestoreEntity):
 
     async def _poll_calendar(self, _now) -> None:
         if not self._calendar_entity:
+            return
+        if self.hass.states.get(self._calendar_entity) is None:
+            _LOGGER.debug("Calendar entity %s not ready yet", self._calendar_entity)
             return
         if self._battery_lock:
             return

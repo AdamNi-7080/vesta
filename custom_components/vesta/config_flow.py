@@ -9,6 +9,7 @@ from .const import (
     CONF_BOILER_ENTITY,
     CONF_BOOST_TEMP,
     CONF_BERMUDA_THRESHOLD,
+    CONF_COMFORT_TEMP,
     CONF_MIN_CYCLE,
     CONF_MAINTENANCE_DAY,
     CONF_MAINTENANCE_TIME,
@@ -16,6 +17,7 @@ from .const import (
     CONF_WEATHER_ENTITY,
     DEFAULT_BOOST_TEMP,
     DEFAULT_BERMUDA_THRESHOLD,
+    DEFAULT_COMFORT_TEMP,
     DEFAULT_MAINTENANCE_DAY,
     DEFAULT_MAINTENANCE_TIME,
     DEFAULT_MIN_CYCLE,
@@ -138,6 +140,11 @@ class VestaOptionsFlowHandler(config_entries.OptionsFlow):
                 vol.Optional(CONF_BOOST_TEMP, default=_default(CONF_BOOST_TEMP)): vol.All(
                     vol.Coerce(int), vol.Range(min=15, max=30)
                 ),
+                vol.Optional(
+                    CONF_COMFORT_TEMP,
+                    default=_default(CONF_COMFORT_TEMP)
+                    or DEFAULT_COMFORT_TEMP,
+                ): vol.All(vol.Coerce(int), vol.Range(min=5, max=30)),
                 vol.Optional(CONF_MIN_CYCLE, default=_default(CONF_MIN_CYCLE)): vol.All(
                     vol.Coerce(int), vol.Range(min=1, max=15)
                 ),

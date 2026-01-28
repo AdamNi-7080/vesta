@@ -33,6 +33,7 @@
         "title": "Vesta Options",
         "data": {
           "min_cycle": "Minimum Boiler Cycle",
+          "comfort_temp": "Comfort Temperature",
           "off_temp": "Frost Protection Temp",
           "eco_temp": "Away/Eco Temp",
           "boost_temp": "Boost Temperature",
@@ -45,6 +46,7 @@
         },
         "data_description": {
           "min_cycle": "Minimum time (minutes) the boiler must run to prevent short-cycling.",
+          "comfort_temp": "Default comfort temperature for occupied rooms.",
           "off_temp": "Temperature to maintain when heating is OFF.",
           "eco_temp": "Default temperature when house is empty.",
           "boost_temp": "Default temperature for manual boosts.",

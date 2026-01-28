@@ -3,6 +3,10 @@
 ## Unreleased
 - None yet.
 
+## 0.1.11
+- Add configurable comfort temperature and use it as schedule fallback.
+- Safe calendar polling and default schedule/eco values on startup.
+
 ## 0.1.10
 - Expand calendar fetch window to include recent past events.
 

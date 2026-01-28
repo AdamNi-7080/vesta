@@ -6,6 +6,7 @@ DOMAIN = "vesta"
 
 CONF_BOILER_ENTITY = "boiler_entity"
 CONF_BOOST_TEMP = "boost_temp"
+CONF_COMFORT_TEMP = "comfort_temp"
 CONF_OFF_TEMP = "off_temp"
 CONF_WEATHER_ENTITY = "weather_entity"
 CONF_MIN_CYCLE = "min_cycle"
