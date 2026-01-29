@@ -5,6 +5,12 @@ import types
 
 
 def _install_fake_homeassistant() -> None:
+    try:
+        import homeassistant  # noqa: F401
+        return
+    except Exception:
+        pass
+
     if "homeassistant" in sys.modules:
         return
 
