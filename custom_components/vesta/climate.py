@@ -347,6 +347,12 @@ class VestaClimate(ClimateEntity, RestoreEntity):
         presence_sources = sorted(
             set(self._presence_sensors + self._distance_sensors)
         )
+        heating_slope, heating_intercept = self._learning.get_heating_regression(
+            self._zone_id
+        )
+        cooling_slope, cooling_intercept = self._learning.get_cooling_regression(
+            self._zone_id
+        )
         return {
             "vesta_active_trvs": list(self._get_valid_trvs()),
             "vesta_temp_sensors": list(temp_sources),
@@ -362,6 +368,10 @@ class VestaClimate(ClimateEntity, RestoreEntity):
             "vesta_cooling_rate": self._learning.get_cooling_rate(
                 self._zone_id, self._get_outdoor_temp(), self._is_sunny()
             ),
+            "vesta_heating_slope": heating_slope,
+            "vesta_heating_intercept": heating_intercept,
+            "vesta_cooling_slope": cooling_slope,
+            "vesta_cooling_intercept": cooling_intercept,
             "vesta_next_schedule_time": self._pending_effective_at,
             "vesta_next_schedule_target": self._pending_target,
             "vesta_is_preheating": self._preheat_active,

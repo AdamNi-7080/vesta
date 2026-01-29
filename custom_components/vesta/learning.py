@@ -187,6 +187,12 @@ class VestaLearning:
             return rate
         return DEFAULT_RATE
 
+    def get_heating_regression(
+        self, zone_id: str
+    ) -> tuple[float | None, float | None]:
+        history = self._heating_history.get(zone_id, [])
+        return self._regression_from_history(history)
+
     def get_cooling_rate(
         self, zone_id: str, outdoor_temp: float | None, is_sunny: bool = False
     ) -> float:
@@ -197,6 +203,12 @@ class VestaLearning:
         if rate is not None:
             return rate
         return DEFAULT_COOLING_RATE
+
+    def get_cooling_regression(
+        self, zone_id: str
+    ) -> tuple[float | None, float | None]:
+        history = self._cooling_history.get(zone_id, [])
+        return self._regression_from_history(history)
 
     def _predict_rate(
         self, history: list[dict[str, float]], outdoor_temp: float
@@ -209,6 +221,14 @@ class VestaLearning:
             return None
         predicted = (slope * outdoor_temp) + intercept
         return max(RATE_MIN, min(RATE_MAX, predicted))
+
+    def _regression_from_history(
+        self, history: list[dict[str, float]]
+    ) -> tuple[float | None, float | None]:
+        points = self._history_points(history)
+        if len(points) < MIN_HISTORY_POINTS:
+            return None, None
+        return self._linear_regression(points)
 
     def _history_points(
         self, history: list[dict[str, float]]
