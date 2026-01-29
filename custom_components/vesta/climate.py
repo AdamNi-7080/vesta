@@ -99,6 +99,85 @@ HOME_ZONE = "zone.home"
 _LOGGER = logging.getLogger(__name__)
 
 
+class ClimateState:
+    async def set_temperature(self, climate: "VestaClimate", **kwargs) -> None:
+        raise NotImplementedError
+
+    async def set_hvac_mode(
+        self, climate: "VestaClimate", hvac_mode: HVACMode
+    ) -> None:
+        raise NotImplementedError
+
+    async def apply_output(
+        self, climate: "VestaClimate", *, immediate_demand: bool
+    ) -> None:
+        raise NotImplementedError
+
+
+class _OperationalState(ClimateState):
+    async def set_temperature(self, climate: "VestaClimate", **kwargs) -> None:
+        await climate._handle_set_temperature(**kwargs)
+
+    async def set_hvac_mode(
+        self, climate: "VestaClimate", hvac_mode: HVACMode
+    ) -> None:
+        await climate._handle_set_hvac_mode(hvac_mode)
+
+    async def apply_output(
+        self, climate: "VestaClimate", *, immediate_demand: bool
+    ) -> None:
+        await climate._apply_output_internal(immediate_demand=immediate_demand)
+
+
+class _BatteryCriticalState(ClimateState):
+    async def set_temperature(self, climate: "VestaClimate", **kwargs) -> None:
+        _LOGGER.warning(
+            "Vesta battery failsafe active for %s: ignoring manual override",
+            climate._area_name,
+        )
+
+    async def set_hvac_mode(
+        self, climate: "VestaClimate", hvac_mode: HVACMode
+    ) -> None:
+        _LOGGER.warning(
+            "Vesta battery failsafe active for %s: ignoring HVAC mode change",
+            climate._area_name,
+        )
+
+    async def apply_output(
+        self, climate: "VestaClimate", *, immediate_demand: bool
+    ) -> None:
+        valid_trvs = climate._get_valid_trvs() if climate._trvs else []
+        if climate._trvs and not valid_trvs:
+            climate._warn_no_trvs()
+            await climate._update_demand(None, immediate=immediate_demand)
+            climate.async_write_ha_state()
+            return
+        await climate._set_trvs_temp(FAILSAFE_TEMP)
+        await climate._update_demand(None, immediate=immediate_demand)
+        climate.async_write_ha_state()
+
+
+class _MaintenanceState(ClimateState):
+    async def set_temperature(self, climate: "VestaClimate", **kwargs) -> None:
+        await _OPERATIONAL_STATE.set_temperature(climate, **kwargs)
+
+    async def set_hvac_mode(
+        self, climate: "VestaClimate", hvac_mode: HVACMode
+    ) -> None:
+        await _OPERATIONAL_STATE.set_hvac_mode(climate, hvac_mode)
+
+    async def apply_output(
+        self, climate: "VestaClimate", *, immediate_demand: bool
+    ) -> None:
+        climate.async_write_ha_state()
+
+
+_OPERATIONAL_STATE = _OperationalState()
+_BATTERY_CRITICAL_STATE = _BatteryCriticalState()
+_MAINTENANCE_STATE = _MaintenanceState()
+
+
 async def async_setup_entry(hass, entry, async_add_entities):
     """Set up Vesta climate entities from a config entry."""
     data = hass.data[DOMAIN]
@@ -413,14 +492,14 @@ class VestaClimate(ClimateEntity, RestoreEntity):
             self._maintenance_task = None
 
     async def async_set_temperature(self, **kwargs) -> None:
+        await self._select_state().set_temperature(self, **kwargs)
+
+    async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
+        await self._select_state().set_hvac_mode(self, hvac_mode)
+
+    async def _handle_set_temperature(self, **kwargs) -> None:
         temperature = kwargs.get(ATTR_TEMPERATURE)
         if temperature is None:
-            return
-        if self._battery_lock:
-            _LOGGER.warning(
-                "Vesta battery failsafe active for %s: ignoring manual override",
-                self._area_name,
-            )
             return
         new_temp = float(temperature)
         schedule_target = self._schedule_target or self._off_temp
@@ -435,13 +514,7 @@ class VestaClimate(ClimateEntity, RestoreEntity):
 
         await self._apply_output(immediate_demand=True)
 
-    async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
-        if self._battery_lock:
-            _LOGGER.warning(
-                "Vesta battery failsafe active for %s: ignoring HVAC mode change",
-                self._area_name,
-            )
-            return
+    async def _handle_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
         self._user_hvac_off = hvac_mode == HVACMode.OFF
         if self._user_hvac_off:
             self._cancel_preheat()
@@ -621,6 +694,13 @@ class VestaClimate(ClimateEntity, RestoreEntity):
         if self._window_manager.is_forced_off(dt_util.utcnow()):
             return True
         return False
+
+    def _select_state(self) -> ClimateState:
+        if self._battery_lock:
+            return _BATTERY_CRITICAL_STATE
+        if self._maintenance_active:
+            return _MAINTENANCE_STATE
+        return _OPERATIONAL_STATE
 
     def _target_context(self) -> TargetContext:
         return TargetContext(
@@ -900,22 +980,14 @@ class VestaClimate(ClimateEntity, RestoreEntity):
         }
 
     async def _apply_output(self, *, immediate_demand: bool = False) -> None:
+        await self._select_state().apply_output(
+            self, immediate_demand=immediate_demand
+        )
+
+    async def _apply_output_internal(
+        self, *, immediate_demand: bool = False
+    ) -> None:
         valid_trvs = self._get_valid_trvs() if self._trvs else []
-        if self._battery_lock:
-            if self._trvs and not valid_trvs:
-                self._warn_no_trvs()
-                await self._update_demand(None, immediate=immediate_demand)
-                self.async_write_ha_state()
-                return
-            await self._set_trvs_temp(FAILSAFE_TEMP)
-            await self._update_demand(None, immediate=immediate_demand)
-            self.async_write_ha_state()
-            return
-
-        if self._maintenance_active:
-            self.async_write_ha_state()
-            return
-
         target = self._effective_target()
         forced_off = self._is_forced_off()
 
