@@ -3,6 +3,9 @@
 ## Unreleased
 - None yet.
 
+## 0.2.3
+- Avoid redundant TRV commands when targets are already applied.
+
 ## 0.2.2
 - Fix Home Assistant startup listener to run on the main loop.
 
