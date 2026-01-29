@@ -396,11 +396,11 @@ class VestaClimate(ClimateEntity, RestoreEntity):
 
     async def _handle_window_hold_cleared(self) -> None:
         _LOGGER.info("Window hold cleared for %s", self._area_name)
-        self._schedule_output_update(immediate=True, immediate_demand=True)
+        self._schedule_output_update()
 
     async def _handle_window_manager_update(self, _window_open: bool) -> None:
         _LOGGER.debug("Window state changed for %s", self._area_name)
-        self._schedule_output_update(immediate=True, immediate_demand=True)
+        self._schedule_output_update()
 
     async def _handle_presence_manager_update(self, _presence_on: bool) -> None:
         _LOGGER.debug("Presence state changed for %s", self._area_name)
@@ -598,7 +598,6 @@ class VestaClimate(ClimateEntity, RestoreEntity):
 
     async def _handle_state_change(self, event) -> None:
         entity_id = event.data.get("entity_id")
-        immediate = False
         _LOGGER.debug(
             "State change detected for %s (%s)",
             self._area_name,
@@ -609,13 +608,9 @@ class VestaClimate(ClimateEntity, RestoreEntity):
         elif entity_id in self._humidity_sensors:
             await self._update_current_humidity()
         elif entity_id in self._battery_sensors:
-            if await self._refresh_battery_state():
-                immediate = True
-            else:
+            if not await self._refresh_battery_state():
                 return
-        self._schedule_output_update(
-            immediate=immediate, immediate_demand=immediate
-        )
+        self._schedule_output_update()
 
     async def _load_schedule_target(self) -> None:
         state = self.hass.states.get(self._schedule_entity_id)
