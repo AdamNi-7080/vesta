@@ -40,6 +40,10 @@ from homeassistant.helpers.event import (
 from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.util import dt as dt_util
 
+from .domain.climate import (
+    calculate_temperature_compensation,
+    compute_preheat_start,
+)
 from .const import (
     CONF_COMFORT_TEMP,
     CONF_MAINTENANCE_DAY,
@@ -698,7 +702,19 @@ class VestaClimate(ClimateEntity, RestoreEntity):
             self.hass, delay, _apply_future
         )
 
-        start_at = self._compute_preheat_start(target, effective_at)
+        allow_preheat = self._is_home() or self._is_guest_mode()
+        rate = 0.0
+        if allow_preheat:
+            rate = self._learning.get_rate(
+                self._zone_id, self._get_outdoor_temp(), self._is_sunny()
+            )
+        start_at = compute_preheat_start(
+            current_temp=self._current_temperature,
+            target_temp=target,
+            effective_at=effective_at,
+            heating_rate=rate,
+            allow_preheat=allow_preheat,
+        )
         if start_at is None:
             return
         if start_at <= now:
@@ -810,25 +826,6 @@ class VestaClimate(ClimateEntity, RestoreEntity):
             _LOGGER.warning("Calendar poll failed: %s", err)
             return []
         return _extract_calendar_events(response, self._calendar_entity)
-
-    def _compute_preheat_start(
-        self, target: float, effective_at: dt_util.dt.datetime
-    ) -> dt_util.dt.datetime | None:
-        if not (self._is_home() or self._is_guest_mode()):
-            return None
-        if self._current_temperature is None:
-            return None
-        if target <= self._current_temperature:
-            return None
-        rate = self._learning.get_rate(
-            self._zone_id, self._get_outdoor_temp(), self._is_sunny()
-        )
-        if rate <= 0:
-            return None
-        seconds = ((target - self._current_temperature) / rate) * 3600
-        if seconds <= 0:
-            return None
-        return effective_at - timedelta(seconds=seconds)
 
     async def _start_preheat(
         self, target: float, effective_at: dt_util.dt.datetime
@@ -1032,14 +1029,16 @@ class VestaClimate(ClimateEntity, RestoreEntity):
             elif target is not None:
                 send_target = target
                 if self._temp_sensors and self._current_temperature is not None:
-                    error = target - self._current_temperature
-                    compensated_target = target + (error * 2.0)
-                    send_target = max(5.0, min(30.0, compensated_target))
+                    compensation = calculate_temperature_compensation(
+                        target_temp=target,
+                        current_temp=self._current_temperature,
+                    )
+                    send_target = compensation.clamped_target
                     _LOGGER.debug(
                         "Room is %s, Target %s. Error %s. Sending %s to TRVs",
                         round(self._current_temperature, 2),
                         round(target, 2),
-                        round(error, 2),
+                        round(compensation.error, 2),
                         round(send_target, 2),
                     )
                 await self.hass.services.async_call(
