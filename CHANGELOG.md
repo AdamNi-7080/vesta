@@ -3,6 +3,11 @@
 ## Unreleased
 - None yet.
 
+## 0.2.1
+- Make sensor-driven updates lazy to reduce boiler recalculation churn.
+- Clear window detection history after holds to prevent repeat triggers.
+- Treat UNKNOWN/UNAVAILABLE master switch states as "on" for safety.
+
 ## 0.2.0
 - Refactor thermostat math into a domain layer and split calendar/presence/window logic into dedicated modules.
 - Add strategy/command/observer patterns for boiler drivers, valve control, and manager notifications.
