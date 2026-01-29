@@ -3,6 +3,9 @@
 ## Unreleased
 - None yet.
 
+## 0.2.2
+- Fix Home Assistant startup listener to run on the main loop.
+
 ## 0.2.1
 - Make sensor-driven updates lazy to reduce boiler recalculation churn.
 - Clear window detection history after holds to prevent repeat triggers.
