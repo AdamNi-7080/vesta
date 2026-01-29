@@ -86,6 +86,11 @@ def _discover_areas(hass: HomeAssistant, config: dict) -> dict[str, dict]:
         for label_id, label in label_reg.labels.items()
         if label.name.lower() == "vesta_ignore"
     }
+    include_label_ids = {
+        label_id
+        for label_id, label in label_reg.labels.items()
+        if label.name.lower() == "vesta_include"
+    }
 
     entities_by_area: dict[str, list[er.RegistryEntry]] = {}
     for entity in entity_reg.entities.values():
@@ -112,8 +117,9 @@ def _discover_areas(hass: HomeAssistant, config: dict) -> dict[str, dict]:
         battery_sensors: list[str] = []
 
         for entry in entries:
-            if _has_ignore_label(entry, ignore_label_ids):
+            if _has_label(entry, ignore_label_ids):
                 continue
+            has_include = _has_label(entry, include_label_ids)
             if entry.domain == "climate" and entry.platform != DOMAIN:
                 if boiler_entity and entry.entity_id == boiler_entity:
                     continue
@@ -130,7 +136,9 @@ def _discover_areas(hass: HomeAssistant, config: dict) -> dict[str, dict]:
                     if boiler_entity and entry.entity_id == boiler_entity:
                         continue
                     entity_id_lower = entry.entity_id.lower()
-                    if any(token in entity_id_lower for token in skip_substrings):
+                    if not has_include and any(
+                        token in entity_id_lower for token in skip_substrings
+                    ):
                         continue
                     temp_sensors.append(entry.entity_id)
                 elif device_class == "humidity":
@@ -143,7 +151,7 @@ def _discover_areas(hass: HomeAssistant, config: dict) -> dict[str, dict]:
         if climate_device_ids:
             for entry in entity_reg.entities.values():
                 if entry.device_id in climate_device_ids:
-                    if _has_ignore_label(entry, ignore_label_ids):
+                    if _has_label(entry, ignore_label_ids):
                         continue
                     device_class = getattr(entry, "device_class", None) or getattr(
                         entry, "original_device_class", None
@@ -176,11 +184,11 @@ def _discover_areas(hass: HomeAssistant, config: dict) -> dict[str, dict]:
     return areas
 
 
-def _has_ignore_label(entry: er.RegistryEntry, ignore_label_ids: set[str]) -> bool:
+def _has_label(entry: er.RegistryEntry, label_ids: set[str]) -> bool:
     labels = getattr(entry, "labels", None)
-    if not labels or not ignore_label_ids:
+    if not labels or not label_ids:
         return False
-    return bool(set(labels) & ignore_label_ids)
+    return bool(set(labels) & label_ids)
 
 
 def _register_services(hass: HomeAssistant) -> None:
