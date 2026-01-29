@@ -35,6 +35,7 @@ _LOGGER = logging.getLogger(__name__)
 
 MASTER_SWITCH_ENTITY = "switch.vesta_master_heating"
 FAILSAFE_RETRY_SECONDS = 60
+RETRY_MAX_SECONDS = 3600
 DEMAND_UPDATE_DEBOUNCE_SECONDS = 5
 CIRCUIT_BREAKER_FAILURES = 3
 CIRCUIT_BREAKER_RESET_SECONDS = 300
@@ -167,6 +168,7 @@ class BoilerCoordinator(DataUpdateCoordinator):
         self._command_executor = CommandExecutor(hass)
         self._observers: list[BoilerStateObserver] = []
         self._retry_unsub = None
+        self._retry_attempts = 0
         self._master_state_warned = False
         self._state_lock = asyncio.Lock()
 
@@ -304,13 +306,11 @@ class BoilerCoordinator(DataUpdateCoordinator):
         self._retry_unsub = None
 
     def _schedule_retry(self, delay: float, *, replace: bool = False) -> None:
+        _ = replace
         if delay <= 0:
             return
         if self._retry_unsub is not None:
-            if not replace:
-                return
-            self._retry_unsub()
-            self._retry_unsub = None
+            return
 
         async def _retry(_now):
             self._retry_unsub = None
@@ -344,6 +344,7 @@ class BoilerCoordinator(DataUpdateCoordinator):
             self._set_state(_FIRING_STATE)
             return
 
+        self._retry_attempts += 1
         self._set_state(_FAILSAFE_STATE)
         self._schedule_retry(self._failsafe_delay(now), replace=True)
 
@@ -351,6 +352,7 @@ class BoilerCoordinator(DataUpdateCoordinator):
         now = dt_util.utcnow()
         success, was_on = await self._turn_boiler_off()
         if not success:
+            self._retry_attempts += 1
             self._set_state(_FAILSAFE_STATE)
             self._schedule_retry(self._failsafe_delay(now), replace=True)
             return
@@ -370,7 +372,11 @@ class BoilerCoordinator(DataUpdateCoordinator):
 
     def _failsafe_delay(self, now: dt_util.dt.datetime) -> float:
         breaker_delay = self._breaker.next_attempt_in(now)
-        return breaker_delay if breaker_delay > 0 else FAILSAFE_RETRY_SECONDS
+        backoff = FAILSAFE_RETRY_SECONDS * (2**self._retry_attempts)
+        backoff = min(backoff, RETRY_MAX_SECONDS)
+        if breaker_delay > 0:
+            return max(breaker_delay, backoff)
+        return backoff
 
     async def _turn_boiler_on(self) -> bool:
         now = dt_util.utcnow()
@@ -383,6 +389,7 @@ class BoilerCoordinator(DataUpdateCoordinator):
 
         if result.success:
             self._breaker.record_success()
+            self._retry_attempts = 0
             return True
 
         if result.error == "entity unavailable":
@@ -414,6 +421,7 @@ class BoilerCoordinator(DataUpdateCoordinator):
 
         if result.success:
             self._breaker.record_success()
+            self._retry_attempts = 0
             return True, was_on
 
         if result.error == "entity unavailable":
