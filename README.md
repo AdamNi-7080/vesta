@@ -87,6 +87,22 @@ data:
 - If a battery failsafe is active, calendar and schedule updates are ignored until batteries recover.
 - To exclude a specific device (for example, a rogue temperature sensor or a specific TRV) from Vesta's control, create a Label in Home Assistant named `vesta_ignore` and assign it to the device or entity. Vesta will skip it during discovery.
 
+## Logging & Debugging
+Vesta logs are namespaced under `custom_components.vesta` (and submodules like `custom_components.vesta.coordinator`). For deep troubleshooting, enable debug logs for the integration:
+
+```yaml
+logger:
+  default: info
+  logs:
+    custom_components.vesta: debug
+```
+
+Helpful log signals include:
+- Boiler state transitions (idle, firing, anti-cycle, failsafe).
+- Demand changes and debounce timing.
+- Window hold triggers and clears.
+- Schedule updates and calendar-derived targets.
+
 ## File Structure
 ```
 vesta/
