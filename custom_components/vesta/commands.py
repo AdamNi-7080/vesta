@@ -20,9 +20,6 @@ from homeassistant.const import (
 )
 from homeassistant.util import dt as dt_util
 
-from .const import DEFAULT_OFF_TEMP
-
-
 @dataclass(frozen=True)
 class CommandResult:
     success: bool
@@ -86,119 +83,148 @@ class CommandExecutor:
             self._history.pop(0)
 
 
-@dataclass(frozen=True)
-class TurnBoilerOnCommand:
+class BoilerDriver(Protocol):
     entity_id: str
     boost_temp: float
+    off_temp: float
 
-    def summary(self) -> str:
-        return f"{self.entity_id} -> {self.boost_temp}"
+    async def turn_on(self, hass) -> CommandResult: ...
 
-    async def execute(self, hass) -> CommandResult:
-        domain = self.entity_id.split(".", 1)[0]
+    async def turn_off(self, hass) -> CommandResult: ...
+
+
+@dataclass(frozen=True)
+class ClimateBoilerDriver:
+    entity_id: str
+    boost_temp: float
+    off_temp: float
+
+    async def turn_on(self, hass) -> CommandResult:
         state = hass.states.get(self.entity_id)
         if state is None or state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
             return CommandResult(False, error="entity unavailable")
 
-        already_on = False
-        if domain == "climate":
-            current_temp = state.attributes.get(ATTR_TEMPERATURE)
-            try:
-                current_temp = float(current_temp)
-            except (TypeError, ValueError):
-                current_temp = None
-            if (
-                state.state == HVACMode.HEAT
-                and current_temp is not None
-                and abs(current_temp - self.boost_temp) < 0.1
-            ):
-                already_on = True
-        elif state.state == STATE_ON:
-            already_on = True
-
-        if already_on:
+        current_temp = state.attributes.get(ATTR_TEMPERATURE)
+        try:
+            current_temp = float(current_temp)
+        except (TypeError, ValueError):
+            current_temp = None
+        if (
+            state.state == HVACMode.HEAT
+            and current_temp is not None
+            and abs(current_temp - self.boost_temp) < 0.1
+        ):
             return CommandResult(True)
-        if domain == "climate":
-            if not hass.services.has_service("climate", SERVICE_SET_TEMPERATURE):
-                return CommandResult(False, error="set_temperature unavailable")
+        if not hass.services.has_service("climate", SERVICE_SET_TEMPERATURE):
+            return CommandResult(False, error="set_temperature unavailable")
+        if hass.services.has_service("climate", SERVICE_SET_HVAC_MODE):
+            await hass.services.async_call(
+                "climate",
+                SERVICE_SET_HVAC_MODE,
+                {ATTR_ENTITY_ID: self.entity_id, "hvac_mode": HVACMode.HEAT},
+                blocking=True,
+            )
+        await hass.services.async_call(
+            "climate",
+            SERVICE_SET_TEMPERATURE,
+            {ATTR_ENTITY_ID: self.entity_id, ATTR_TEMPERATURE: self.boost_temp},
+            blocking=True,
+        )
+        return CommandResult(True)
+
+    async def turn_off(self, hass) -> CommandResult:
+        state = hass.states.get(self.entity_id)
+        if state is None or state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
+            return CommandResult(False, error="entity unavailable")
+
+        was_on = state.state == HVACMode.HEAT
+        if not hass.services.has_service("climate", SERVICE_SET_TEMPERATURE):
+            return CommandResult(False, error="set_temperature unavailable")
+        state = hass.states.get(self.entity_id)
+        hvac_modes = []
+        if state is not None:
+            hvac_modes = state.attributes.get(ATTR_HVAC_MODES, [])
+        if HVACMode.OFF in hvac_modes:
             if hass.services.has_service("climate", SERVICE_SET_HVAC_MODE):
                 await hass.services.async_call(
                     "climate",
                     SERVICE_SET_HVAC_MODE,
-                    {ATTR_ENTITY_ID: self.entity_id, "hvac_mode": HVACMode.HEAT},
+                    {ATTR_ENTITY_ID: self.entity_id, "hvac_mode": HVACMode.OFF},
                     blocking=True,
                 )
-            await hass.services.async_call(
-                "climate",
-                SERVICE_SET_TEMPERATURE,
-                {
-                    ATTR_ENTITY_ID: self.entity_id,
-                    ATTR_TEMPERATURE: self.boost_temp,
-                },
-                blocking=True,
-            )
-        else:
-            await hass.services.async_call(
-                domain,
-                "turn_on",
-                {ATTR_ENTITY_ID: self.entity_id},
-                blocking=True,
-            )
+        await hass.services.async_call(
+            "climate",
+            SERVICE_SET_TEMPERATURE,
+            {ATTR_ENTITY_ID: self.entity_id, ATTR_TEMPERATURE: self.off_temp},
+            blocking=True,
+        )
+        return CommandResult(True, data={"was_on": was_on})
+
+
+@dataclass(frozen=True)
+class DomainBoilerDriver:
+    entity_id: str
+    boost_temp: float
+    off_temp: float
+    domain: str
+
+    async def turn_on(self, hass) -> CommandResult:
+        state = hass.states.get(self.entity_id)
+        if state is None or state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
+            return CommandResult(False, error="entity unavailable")
+        if state.state == STATE_ON:
+            return CommandResult(True)
+        await hass.services.async_call(
+            self.domain,
+            "turn_on",
+            {ATTR_ENTITY_ID: self.entity_id},
+            blocking=True,
+        )
         return CommandResult(True)
+
+    async def turn_off(self, hass) -> CommandResult:
+        state = hass.states.get(self.entity_id)
+        if state is None or state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
+            return CommandResult(False, error="entity unavailable")
+        was_on = state.state == STATE_ON
+        await hass.services.async_call(
+            self.domain,
+            "turn_off",
+            {ATTR_ENTITY_ID: self.entity_id},
+            blocking=True,
+        )
+        return CommandResult(True, data={"was_on": was_on})
+
+
+def build_boiler_driver(
+    entity_id: str, boost_temp: float, off_temp: float
+) -> BoilerDriver:
+    domain = entity_id.split(".", 1)[0]
+    if domain == "climate":
+        return ClimateBoilerDriver(entity_id, boost_temp, off_temp)
+    return DomainBoilerDriver(entity_id, boost_temp, off_temp, domain)
+
+
+@dataclass(frozen=True)
+class TurnBoilerOnCommand:
+    driver: BoilerDriver
+
+    def summary(self) -> str:
+        return f"{self.driver.entity_id} -> {self.driver.boost_temp}"
+
+    async def execute(self, hass) -> CommandResult:
+        return await self.driver.turn_on(hass)
 
 
 @dataclass(frozen=True)
 class TurnBoilerOffCommand:
-    entity_id: str
-    off_temp: float = DEFAULT_OFF_TEMP
+    driver: BoilerDriver
 
     def summary(self) -> str:
-        return f"{self.entity_id} -> {self.off_temp}"
+        return f"{self.driver.entity_id} -> {self.driver.off_temp}"
 
     async def execute(self, hass) -> CommandResult:
-        domain = self.entity_id.split(".", 1)[0]
-        state = hass.states.get(self.entity_id)
-        if state is None or state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
-            return CommandResult(False, error="entity unavailable")
-
-        was_on = False
-        if domain == "climate":
-            was_on = state.state == HVACMode.HEAT
-        else:
-            was_on = state.state == STATE_ON
-
-        if domain == "climate":
-            if not hass.services.has_service("climate", SERVICE_SET_TEMPERATURE):
-                return CommandResult(False, error="set_temperature unavailable")
-            state = hass.states.get(self.entity_id)
-            hvac_modes = []
-            if state is not None:
-                hvac_modes = state.attributes.get(ATTR_HVAC_MODES, [])
-            if HVACMode.OFF in hvac_modes:
-                if hass.services.has_service("climate", SERVICE_SET_HVAC_MODE):
-                    await hass.services.async_call(
-                        "climate",
-                        SERVICE_SET_HVAC_MODE,
-                        {ATTR_ENTITY_ID: self.entity_id, "hvac_mode": HVACMode.OFF},
-                        blocking=True,
-                    )
-            await hass.services.async_call(
-                "climate",
-                SERVICE_SET_TEMPERATURE,
-                {
-                    ATTR_ENTITY_ID: self.entity_id,
-                    ATTR_TEMPERATURE: self.off_temp,
-                },
-                blocking=True,
-            )
-        else:
-            await hass.services.async_call(
-                domain,
-                "turn_off",
-                {ATTR_ENTITY_ID: self.entity_id},
-                blocking=True,
-            )
-        return CommandResult(True, data={"was_on": was_on})
+        return await self.driver.turn_off(hass)
 
 
 @dataclass(frozen=True)

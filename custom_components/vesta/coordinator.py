@@ -15,7 +15,12 @@ from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import dt as dt_util
 
-from .commands import CommandExecutor, TurnBoilerOffCommand, TurnBoilerOnCommand
+from .commands import (
+    CommandExecutor,
+    TurnBoilerOffCommand,
+    TurnBoilerOnCommand,
+    build_boiler_driver,
+)
 from .const import (
     CONF_BOILER_ENTITY,
     CONF_BOOST_TEMP,
@@ -147,6 +152,9 @@ class BoilerCoordinator(DataUpdateCoordinator):
         self._boost_temp = config.get(CONF_BOOST_TEMP, DEFAULT_BOOST_TEMP)
         self._off_temp = config.get(CONF_OFF_TEMP, DEFAULT_OFF_TEMP)
         self._min_cycle = config.get(CONF_MIN_CYCLE, DEFAULT_MIN_CYCLE)
+        self._boiler_driver = build_boiler_driver(
+            self._boiler_entity, self._boost_temp, self._off_temp
+        )
         self._demand: dict[str, bool] = {}
         self._pending_demand: dict[str, bool] = {}
         self._demand_update_unsub = None
@@ -370,7 +378,7 @@ class BoilerCoordinator(DataUpdateCoordinator):
             _LOGGER.debug("Boiler circuit breaker open; skipping turn_on")
             return False
 
-        command = TurnBoilerOnCommand(self._boiler_entity, self._boost_temp)
+        command = TurnBoilerOnCommand(self._boiler_driver)
         result = await self._command_executor.execute(command, propagate=False)
 
         if result.success:
@@ -398,7 +406,7 @@ class BoilerCoordinator(DataUpdateCoordinator):
             _LOGGER.debug("Boiler circuit breaker open; skipping turn_off")
             return False, False
 
-        command = TurnBoilerOffCommand(self._boiler_entity, self._off_temp)
+        command = TurnBoilerOffCommand(self._boiler_driver)
         result = await self._command_executor.execute(command, propagate=False)
         was_on = False
         if result.data and "was_on" in result.data:
