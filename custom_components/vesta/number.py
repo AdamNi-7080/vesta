@@ -54,7 +54,7 @@ class VestaScheduleNumber(NumberEntity, RestoreEntity):
                 return
             except ValueError:
                 pass
-        self._attr_native_value = 21.0
+        self._attr_native_value = 18.0
 
     async def async_set_native_value(self, value: float) -> None:
         self._attr_native_value = float(value)

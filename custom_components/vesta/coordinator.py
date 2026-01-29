@@ -177,8 +177,6 @@ class BoilerCoordinator(DataUpdateCoordinator):
         self._boiler_on = True
 
     async def _turn_boiler_off(self, force: bool = False) -> None:
-        if not self._boiler_on and not force:
-            return
         domain = self._boiler_entity.split(".", 1)[0]
         state = self.hass.states.get(self._boiler_entity)
         if state is None or state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):

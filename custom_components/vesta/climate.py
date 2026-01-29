@@ -204,7 +204,6 @@ class VestaClimate(ClimateEntity, RestoreEntity):
         self._idle_start_temp: float | None = None
         self._last_trv_warning: dt_util.dt.datetime | None = None
         self._retry_unsub = None
-        self._startup_unsub = None
         self._startup_done = False
 
         self._unsubs: list[callable] = []
@@ -300,23 +299,15 @@ class VestaClimate(ClimateEntity, RestoreEntity):
         if self.hass.state == CoreState.running:
             await self.async_startup()
         else:
-            if self._startup_unsub:
-                self._startup_unsub()
-            self._startup_unsub = self.hass.bus.async_listen_once(
-                EVENT_HOMEASSISTANT_START, self._on_ha_start
+            self.hass.bus.async_listen_once(
+                EVENT_HOMEASSISTANT_START,
+                lambda _: self.hass.async_create_task(self.async_startup()),
             )
-
-    async def _on_ha_start(self, _event) -> None:
-        self._startup_unsub = None
-        await self.async_startup()
 
     async def async_startup(self) -> None:
         if self._startup_done:
             return
         self._startup_done = True
-        if self._startup_unsub:
-            self._startup_unsub()
-            self._startup_unsub = None
 
         await self._load_schedule_target()
         self._refresh_presence()
@@ -360,9 +351,6 @@ class VestaClimate(ClimateEntity, RestoreEntity):
         if self._window_hold_unsub:
             self._window_hold_unsub()
             self._window_hold_unsub = None
-        if self._startup_unsub:
-            self._startup_unsub()
-            self._startup_unsub = None
         self._cancel_preheat()
         if self._maintenance_task:
             self._maintenance_task.cancel()
