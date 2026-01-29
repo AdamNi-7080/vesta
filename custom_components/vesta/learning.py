@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+import inspect
+from typing import Awaitable, Callable
 
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
@@ -26,11 +28,13 @@ class _ThermalLearningBase:
         rates: dict[str, dict[str, float]],
         active_cycles: dict[str, _Cycle],
         default_rate: float,
+        kind: str,
     ) -> None:
         self._parent = parent
         self._rates = rates
         self._active_cycles = active_cycles
         self._default_rate = default_rate
+        self._kind = kind
 
     async def end_cycle(self, zone_id: str, end_temp: float) -> None:
         cycle = self._active_cycles.pop(zone_id, None)
@@ -52,6 +56,14 @@ class _ThermalLearningBase:
         )
         zone[bucket] = round(new_rate, 3)
         await self._parent.async_save()
+        await self._parent._notify_rate_update(
+            LearningUpdate(
+                zone_id=zone_id,
+                kind=self._kind,
+                bucket=bucket,
+                rate=zone[bucket],
+            )
+        )
 
     def _calculate_delta(self, start_temp: float, end_temp: float) -> float:
         raise NotImplementedError
@@ -75,6 +87,14 @@ class _Cycle:
     is_sunny: bool
 
 
+@dataclass(frozen=True)
+class LearningUpdate:
+    zone_id: str
+    kind: str
+    bucket: str
+    rate: float
+
+
 class VestaLearning:
     """Learning manager for heating and cooling rate per zone and weather bucket."""
 
@@ -84,18 +104,41 @@ class VestaLearning:
         self._cooling_rates: dict[str, dict[str, float]] = {}
         self._active_heating: dict[str, _Cycle] = {}
         self._active_cooling: dict[str, _Cycle] = {}
+        self._observers: list[Callable[[LearningUpdate], Awaitable[None] | None]] = []
         self._heating_learning = _HeatingLearning(
             self,
             rates=self._heating_rates,
             active_cycles=self._active_heating,
             default_rate=DEFAULT_RATE,
+            kind="heating",
         )
         self._cooling_learning = _CoolingLearning(
             self,
             rates=self._cooling_rates,
             active_cycles=self._active_cooling,
             default_rate=DEFAULT_COOLING_RATE,
+            kind="cooling",
         )
+
+    def add_observer(
+        self, observer: Callable[[LearningUpdate], Awaitable[None] | None]
+    ) -> None:
+        if observer not in self._observers:
+            self._observers.append(observer)
+
+    def remove_observer(
+        self, observer: Callable[[LearningUpdate], Awaitable[None] | None]
+    ) -> None:
+        if observer in self._observers:
+            self._observers.remove(observer)
+
+    async def _notify_rate_update(self, update: LearningUpdate) -> None:
+        if not self._observers:
+            return
+        for observer in list(self._observers):
+            result = observer(update)
+            if inspect.isawaitable(result):
+                await result
 
     async def async_load(self) -> None:
         loaded = await self._store.async_load()
