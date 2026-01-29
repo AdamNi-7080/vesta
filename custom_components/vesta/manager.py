@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import timedelta
 import inspect
 import math
+import logging
 from typing import Awaitable, Callable
 
 from homeassistant.const import (
@@ -19,6 +20,7 @@ from homeassistant.helpers.event import (
 )
 from homeassistant.util import dt as dt_util
 
+_LOGGER = logging.getLogger(__name__)
 
 class _WindowState:
     window_open = False
@@ -134,6 +136,12 @@ class _BaseSensorManager:
         current = self._get_active()
         changed = current != previous
         if changed:
+            _LOGGER.debug(
+                "%s state changed: %s -> %s",
+                self.__class__.__name__,
+                previous,
+                current,
+            )
             self._on_state_change(current, previous, context)
         return changed
 
@@ -242,6 +250,16 @@ class WindowManager(_BaseSensorManager):
         drop = oldest_temp - temperature
         rate = drop / minutes
         if drop >= 0.5 or rate >= self._window_threshold:
+            location = "unknown"
+            config = getattr(self._hass, "config", None)
+            if config is not None:
+                location = getattr(config, "location_name", location)
+            _LOGGER.info(
+                "Window inferred in %s: drop=%.2f rate=%.2f",
+                location,
+                drop,
+                rate,
+            )
             self._trigger_window_hold()
             return True
         return False
@@ -262,6 +280,7 @@ class WindowManager(_BaseSensorManager):
             self._window_hold_unsub = None
             self._window_hold_until = None
             self._state = self._state.on_hold_cleared()
+            _LOGGER.info("Window hold cleared")
             if self._on_hold_cleared:
                 await self._on_hold_cleared()
 
@@ -269,6 +288,7 @@ class WindowManager(_BaseSensorManager):
             self._hass, self._hold_duration.total_seconds(), _clear_hold
         )
         if self._on_hold_triggered:
+            _LOGGER.info("Window hold started")
             self._on_hold_triggered()
 
 

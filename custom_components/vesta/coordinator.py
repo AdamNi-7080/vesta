@@ -189,6 +189,18 @@ class BoilerCoordinator(DataUpdateCoordinator):
             return
         previous = self._state
         self._state = state
+        if state is _FAILSAFE_STATE:
+            _LOGGER.warning(
+                "Boiler state transition: %s -> %s",
+                previous.name,
+                state.name,
+            )
+        else:
+            _LOGGER.debug(
+                "Boiler state transition: %s -> %s",
+                previous.name,
+                state.name,
+            )
         self._notify_observers(previous, state)
 
     def _notify_observers(
@@ -206,6 +218,12 @@ class BoilerCoordinator(DataUpdateCoordinator):
     ) -> None:
         """Update demand from a zone, optionally batching updates."""
         self._pending_demand[zone_id] = demand
+        _LOGGER.debug(
+            "Demand update queued: zone=%s demand=%s immediate=%s",
+            zone_id,
+            demand,
+            immediate,
+        )
         if immediate:
             self._cancel_demand_update()
             if self._apply_pending_demand_updates():
@@ -232,6 +250,10 @@ class BoilerCoordinator(DataUpdateCoordinator):
             if self._apply_pending_demand_updates():
                 await self._recalculate()
 
+        _LOGGER.debug(
+            "Debouncing demand updates for %.0fs",
+            DEMAND_UPDATE_DEBOUNCE_SECONDS,
+        )
         self._demand_update_unsub = async_call_later(
             self.hass, DEMAND_UPDATE_DEBOUNCE_SECONDS, _flush
         )
@@ -245,6 +267,8 @@ class BoilerCoordinator(DataUpdateCoordinator):
                 changed = True
             self._demand[zone_id] = demand
         self._pending_demand.clear()
+        if changed:
+            _LOGGER.debug("Demand map updated: %s", self._demand)
         return changed
 
     async def _recalculate(self) -> None:
@@ -263,6 +287,9 @@ class BoilerCoordinator(DataUpdateCoordinator):
                     )
                     self._master_state_warned = True
             elif master_state.state == STATE_OFF:
+                _LOGGER.info(
+                    "Master heating switch is off; forcing boiler off"
+                )
                 await self._ensure_boiler_off(force=True)
                 return
 
@@ -312,6 +339,8 @@ class BoilerCoordinator(DataUpdateCoordinator):
         if self._retry_unsub is not None:
             return
 
+        _LOGGER.debug("Scheduling boiler retry in %.0fs", delay)
+
         async def _retry(_now):
             self._retry_unsub = None
             await self._recalculate()
@@ -328,6 +357,11 @@ class BoilerCoordinator(DataUpdateCoordinator):
         breaker_delay = self._breaker.next_attempt_in(now)
         delay = max(remaining, breaker_delay)
         if delay > 0:
+            _LOGGER.debug(
+                "Boiler on suppressed (cooldown=%.0fs breaker=%.0fs)",
+                remaining,
+                breaker_delay,
+            )
             if breaker_delay > 0:
                 self._set_state(_FAILSAFE_STATE)
             elif self._state is not _FAILSAFE_STATE:
@@ -340,6 +374,7 @@ class BoilerCoordinator(DataUpdateCoordinator):
 
         success = await self._turn_boiler_on()
         if success:
+            _LOGGER.info("Boiler turn_on successful")
             self._cancel_retry()
             self._set_state(_FIRING_STATE)
             return
@@ -357,6 +392,7 @@ class BoilerCoordinator(DataUpdateCoordinator):
             self._schedule_retry(self._failsafe_delay(now), replace=True)
             return
 
+        _LOGGER.info("Boiler turn_off successful")
         self._cancel_retry()
         if was_on or force or self._state is _FIRING_STATE:
             self._enter_cooldown(now)

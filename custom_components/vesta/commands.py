@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import logging
 from typing import Any, Protocol
 
 from homeassistant.components.climate.const import (
@@ -19,6 +20,8 @@ from homeassistant.const import (
     STATE_UNKNOWN,
 )
 from homeassistant.util import dt as dt_util
+
+_LOGGER = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class CommandResult:
@@ -81,6 +84,10 @@ class CommandExecutor:
         self._history.append(record)
         if len(self._history) > self._history_size:
             self._history.pop(0)
+        if status == "failed":
+            _LOGGER.warning("Command %s failed: %s", name, detail or "unknown error")
+        elif status != "queued":
+            _LOGGER.debug("Command %s %s", name, status)
 
 
 class BoilerDriver(Protocol):

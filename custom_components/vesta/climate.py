@@ -391,15 +391,19 @@ class VestaClimate(ClimateEntity, RestoreEntity):
         self.hass.bus.async_fire(DOMAIN_EVENT, payload)
 
     def _handle_window_hold_triggered(self) -> None:
+        _LOGGER.info("Window hold triggered for %s", self._area_name)
         self._fire_event(TYPE_WINDOW)
 
     async def _handle_window_hold_cleared(self) -> None:
+        _LOGGER.info("Window hold cleared for %s", self._area_name)
         self._schedule_output_update(immediate=True, immediate_demand=True)
 
     async def _handle_window_manager_update(self, _window_open: bool) -> None:
+        _LOGGER.debug("Window state changed for %s", self._area_name)
         self._schedule_output_update(immediate=True, immediate_demand=True)
 
     async def _handle_presence_manager_update(self, _presence_on: bool) -> None:
+        _LOGGER.debug("Presence state changed for %s", self._area_name)
         self._schedule_output_update()
 
     def _schedule_output_update(
@@ -409,6 +413,11 @@ class VestaClimate(ClimateEntity, RestoreEntity):
             if self._output_update_unsub:
                 self._output_update_unsub()
                 self._output_update_unsub = None
+            _LOGGER.debug(
+                "Immediate output update for %s (immediate_demand=%s)",
+                self._area_name,
+                immediate_demand,
+            )
             self.hass.async_create_task(
                 self._apply_output(immediate_demand=immediate_demand)
             )
@@ -420,6 +429,11 @@ class VestaClimate(ClimateEntity, RestoreEntity):
             self._output_update_unsub = None
             await self._apply_output()
 
+        _LOGGER.debug(
+            "Debouncing output update for %s by %.0fs",
+            self._area_name,
+            OUTPUT_UPDATE_DEBOUNCE.total_seconds(),
+        )
         self._output_update_unsub = async_call_later(
             self.hass, OUTPUT_UPDATE_DEBOUNCE.total_seconds(), _run
         )
@@ -524,6 +538,12 @@ class VestaClimate(ClimateEntity, RestoreEntity):
         new_temp = float(temperature)
         schedule_target = self._schedule_target or self._off_temp
 
+        _LOGGER.info(
+            "Manual target request for %s: %s (schedule %s)",
+            self._area_name,
+            new_temp,
+            schedule_target,
+        )
         self._suppress_calendar_event()
         if new_temp > schedule_target:
             self._set_boost_override(new_temp)
@@ -537,6 +557,7 @@ class VestaClimate(ClimateEntity, RestoreEntity):
     async def _handle_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
         self._user_hvac_off = hvac_mode == HVACMode.OFF
         if self._user_hvac_off:
+            _LOGGER.info("HVAC turned off for %s", self._area_name)
             self._cancel_preheat()
         await self._apply_output(immediate_demand=True)
 
@@ -559,6 +580,12 @@ class VestaClimate(ClimateEntity, RestoreEntity):
             target_value = float(target)
         except (TypeError, ValueError):
             return
+        _LOGGER.info(
+            "Schedule update for %s: target=%s effective_at=%s",
+            self._area_name,
+            target_value,
+            effective_at,
+        )
         self._suppress_calendar_event()
         if effective_at and effective_at > dt_util.utcnow():
             await self._schedule_future_target(target_value, effective_at)
@@ -572,6 +599,11 @@ class VestaClimate(ClimateEntity, RestoreEntity):
     async def _handle_state_change(self, event) -> None:
         entity_id = event.data.get("entity_id")
         immediate = False
+        _LOGGER.debug(
+            "State change detected for %s (%s)",
+            self._area_name,
+            entity_id,
+        )
         if entity_id in self._temp_sensors or entity_id in self._trvs:
             await self._update_current_temperature()
         elif entity_id in self._humidity_sensors:
@@ -617,6 +649,11 @@ class VestaClimate(ClimateEntity, RestoreEntity):
 
         if temps:
             self._current_temperature = sum(temps) / len(temps)
+            _LOGGER.debug(
+                "Current temperature for %s: %.2f",
+                self._area_name,
+                self._current_temperature,
+            )
             if not self._window_sensors:
                 self._window_manager.record_temperature(self._current_temperature)
 
@@ -1006,6 +1043,14 @@ class VestaClimate(ClimateEntity, RestoreEntity):
         target = self._effective_target()
         forced_off = self._is_forced_off()
 
+        _LOGGER.debug(
+            "Applying output for %s: target=%s forced_off=%s trvs=%s",
+            self._area_name,
+            target,
+            forced_off,
+            valid_trvs,
+        )
+
         if self._trvs:
             if not valid_trvs:
                 self._warn_no_trvs()
@@ -1075,6 +1120,14 @@ class VestaClimate(ClimateEntity, RestoreEntity):
 
         now = dt_util.utcnow()
         if demand != self._demand:
+            _LOGGER.debug(
+                "Demand change for %s: %s -> %s (target=%s current=%s)",
+                self._area_name,
+                self._demand,
+                demand,
+                target,
+                self._current_temperature,
+            )
             start_temp = self._current_temperature or target or 0
             baseline_temp = (
                 self._current_temperature
