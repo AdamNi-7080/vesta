@@ -43,6 +43,16 @@ from .domain.climate import (
     compute_preheat_start,
 )
 from .manager import PresenceManager, WindowManager
+from .target_modes import (
+    BoostTargetMode,
+    EcoTargetMode,
+    FailsafeTargetMode,
+    PreheatTargetMode,
+    SaveTargetMode,
+    ScheduledTargetMode,
+    TargetContext,
+    TargetMode,
+)
 from .const import (
     CONF_COMFORT_TEMP,
     CONF_MAINTENANCE_DAY,
@@ -172,9 +182,7 @@ class VestaClimate(ClimateEntity, RestoreEntity):
         self._current_temperature: float | None = None
         self._current_humidity: float | None = None
         self._schedule_target: float | None = None
-        self._override_target: float | None = None
-        self._override_type: str | None = None
-        self._override_expires = None
+        self._override_mode: TargetMode | None = None
         self._user_hvac_off = False
 
         self._boost_unsub = None
@@ -437,7 +445,7 @@ class VestaClimate(ClimateEntity, RestoreEntity):
             return
         self._schedule_target = target_value
         self._cancel_preheat()
-        if self._override_type == "save":
+        if isinstance(self._override_mode, SaveTargetMode):
             self._clear_override()
         await self._apply_output()
 
@@ -534,9 +542,7 @@ class VestaClimate(ClimateEntity, RestoreEntity):
 
     def _set_boost_override(self, target: float) -> None:
         self._cancel_preheat()
-        self._override_type = "boost"
-        self._override_target = target
-        self._override_expires = dt_util.utcnow() + BOOST_DURATION
+        self._override_mode = BoostTargetMode(target)
         if self._boost_unsub:
             self._boost_unsub()
 
@@ -554,17 +560,13 @@ class VestaClimate(ClimateEntity, RestoreEntity):
         if self._boost_unsub:
             self._boost_unsub()
             self._boost_unsub = None
-        self._override_type = "save"
-        self._override_target = target
-        self._override_expires = None
+        self._override_mode = SaveTargetMode(target)
 
     def _clear_override(self) -> None:
         if self._boost_unsub:
             self._boost_unsub()
             self._boost_unsub = None
-        self._override_type = None
-        self._override_target = None
-        self._override_expires = None
+        self._override_mode = None
 
     def _is_master_enabled(self) -> bool:
         state = self.hass.states.get(MASTER_SWITCH)
@@ -581,29 +583,33 @@ class VestaClimate(ClimateEntity, RestoreEntity):
             return True
         return False
 
-    def _effective_target(self) -> float | None:
+    def _target_context(self) -> TargetContext:
+        return TargetContext(
+            schedule_target=self._schedule_target,
+            off_temp=self._off_temp,
+            comfort_temp=self._comfort_temp,
+            eco_temp=self._eco_temp(),
+            has_presence_sensors=bool(self._presence_sensors),
+            presence_on=self._presence_manager.is_present(),
+        )
+
+    def _select_target_mode(self) -> TargetMode:
         if self._battery_lock:
-            return VALVE_MAINTENANCE_HIGH
-        if self._override_target is not None:
-            return self._override_target
+            return FailsafeTargetMode(VALVE_MAINTENANCE_HIGH)
+        if self._override_mode is not None:
+            return self._override_mode
         if self._preheat_active and self._preheat_target is not None:
-            return self._preheat_target
-
-        schedule_target = self._schedule_target
-        if schedule_target is None:
-            schedule_target = self._off_temp
-
-        if not self._presence_manager.is_guest_mode() and not self._presence_manager.is_home():
-            schedule_target = self._eco_temp()
-
+            return PreheatTargetMode(self._preheat_target)
         if (
-            self._presence_sensors
-            and self._presence_manager.is_present()
-            and schedule_target <= self._off_temp
+            not self._presence_manager.is_guest_mode()
+            and not self._presence_manager.is_home()
         ):
-            schedule_target = max(schedule_target, self._comfort_temp)
+            return EcoTargetMode()
+        return ScheduledTargetMode()
 
-        return schedule_target
+    def _effective_target(self) -> float | None:
+        mode = self._select_target_mode()
+        return mode.target(self._target_context())
 
     async def _schedule_future_target(
         self, target: float, effective_at: dt_util.dt.datetime
@@ -709,7 +715,7 @@ class VestaClimate(ClimateEntity, RestoreEntity):
             return
         if self._battery_lock:
             return
-        if self._override_target is not None:
+        if self._override_mode is not None:
             return
         if self._current_temperature is not None and target <= self._current_temperature:
             return
