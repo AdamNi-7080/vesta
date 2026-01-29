@@ -11,11 +11,8 @@ from homeassistant.components.climate.const import (
     ClimateEntityFeature,
     HVACAction,
     HVACMode,
-    SERVICE_SET_HVAC_MODE,
-    SERVICE_SET_TEMPERATURE,
 )
 from homeassistant.const import (
-    ATTR_ENTITY_ID,
     ATTR_TEMPERATURE,
     CONF_DEVICE_ID,
     CONF_TYPE,
@@ -38,6 +35,7 @@ from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.util import dt as dt_util
 
 from .calendar_handler import CalendarHandler, _parse_effective_at
+from .commands import SetTrvModeAndTempCommand
 from .domain.climate import (
     calculate_temperature_compensation,
     compute_preheat_start,
@@ -225,6 +223,7 @@ class VestaClimate(ClimateEntity, RestoreEntity):
         self._distance_sensors = area.get("distance_sensors", [])
         self._schedule_entity_id = f"number.{self._slug}_schedule_target"
         self._coordinator = coordinator
+        self._command_executor = coordinator.command_executor
         self._learning = learning
         self._weather_entity = config.get(CONF_WEATHER_ENTITY)
         self._calendar_entity = area.get("calendar_entity")
@@ -1002,21 +1001,10 @@ class VestaClimate(ClimateEntity, RestoreEntity):
                 self._retry_unsub()
                 self._retry_unsub = None
             if forced_off:
-                await self.hass.services.async_call(
-                    "climate",
-                    SERVICE_SET_HVAC_MODE,
-                    {ATTR_ENTITY_ID: valid_trvs, "hvac_mode": HVACMode.OFF},
-                    blocking=True,
+                command = SetTrvModeAndTempCommand(
+                    valid_trvs, HVACMode.OFF, self._off_temp
                 )
-                await self.hass.services.async_call(
-                    "climate",
-                    SERVICE_SET_TEMPERATURE,
-                    {
-                        ATTR_ENTITY_ID: valid_trvs,
-                        ATTR_TEMPERATURE: self._off_temp,
-                    },
-                    blocking=True,
-                )
+                await self._command_executor.execute(command, propagate=True)
             elif target is not None:
                 send_target = target
                 if self._temp_sensors and self._current_temperature is not None:
@@ -1032,18 +1020,10 @@ class VestaClimate(ClimateEntity, RestoreEntity):
                         round(compensation.error, 2),
                         round(send_target, 2),
                     )
-                await self.hass.services.async_call(
-                    "climate",
-                    SERVICE_SET_HVAC_MODE,
-                    {ATTR_ENTITY_ID: valid_trvs, "hvac_mode": HVACMode.HEAT},
-                    blocking=True,
+                command = SetTrvModeAndTempCommand(
+                    valid_trvs, HVACMode.HEAT, send_target
                 )
-                await self.hass.services.async_call(
-                    "climate",
-                    SERVICE_SET_TEMPERATURE,
-                    {ATTR_ENTITY_ID: valid_trvs, ATTR_TEMPERATURE: send_target},
-                    blocking=True,
-                )
+                await self._command_executor.execute(command, propagate=True)
 
         await self._update_demand(target, immediate=immediate_demand)
         self.async_write_ha_state()
@@ -1055,18 +1035,8 @@ class VestaClimate(ClimateEntity, RestoreEntity):
         if not valid_trvs:
             self._warn_no_trvs()
             return
-        await self.hass.services.async_call(
-            "climate",
-            SERVICE_SET_HVAC_MODE,
-            {ATTR_ENTITY_ID: valid_trvs, "hvac_mode": HVACMode.HEAT},
-            blocking=True,
-        )
-        await self.hass.services.async_call(
-            "climate",
-            SERVICE_SET_TEMPERATURE,
-            {ATTR_ENTITY_ID: valid_trvs, ATTR_TEMPERATURE: temperature},
-            blocking=True,
-        )
+        command = SetTrvModeAndTempCommand(valid_trvs, HVACMode.HEAT, temperature)
+        await self._command_executor.execute(command, propagate=True)
 
     async def _update_demand(
         self, target: float | None, *, immediate: bool = False

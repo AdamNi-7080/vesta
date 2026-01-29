@@ -7,25 +7,13 @@ from enum import Enum
 import logging
 from datetime import timedelta
 
-from homeassistant.components.climate.const import (
-    ATTR_HVAC_MODES,
-    HVACMode,
-    SERVICE_SET_HVAC_MODE,
-    SERVICE_SET_TEMPERATURE,
-)
-from homeassistant.const import (
-    ATTR_ENTITY_ID,
-    ATTR_TEMPERATURE,
-    STATE_OFF,
-    STATE_ON,
-    STATE_UNAVAILABLE,
-    STATE_UNKNOWN,
-)
+from homeassistant.const import STATE_OFF, STATE_UNAVAILABLE, STATE_UNKNOWN
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import dt as dt_util
 
+from .commands import CommandExecutor, TurnBoilerOffCommand, TurnBoilerOnCommand
 from .const import (
     CONF_BOILER_ENTITY,
     CONF_BOOST_TEMP,
@@ -164,9 +152,14 @@ class BoilerCoordinator(DataUpdateCoordinator):
             failure_threshold=CIRCUIT_BREAKER_FAILURES,
             reset_timeout=timedelta(seconds=CIRCUIT_BREAKER_RESET_SECONDS),
         )
+        self._command_executor = CommandExecutor(hass)
         self._retry_unsub = None
         self._master_state_warned = False
         self._state_lock = asyncio.Lock()
+
+    @property
+    def command_executor(self) -> CommandExecutor:
+        return self._command_executor
 
     async def async_update_demand(
         self, zone_id: str, demand: bool, *, immediate: bool = False
@@ -347,83 +340,27 @@ class BoilerCoordinator(DataUpdateCoordinator):
             _LOGGER.debug("Boiler circuit breaker open; skipping turn_on")
             return False
 
-        success = False
-        try:
-            domain = self._boiler_entity.split(".", 1)[0]
-            state = self.hass.states.get(self._boiler_entity)
-            if state is None or state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
-                _LOGGER.warning(
-                    "Boiler entity %s unavailable; scheduling retry",
-                    self._boiler_entity,
-                )
-                success = False
-            else:
-                already_on = False
-                if domain == "climate":
-                    current_temp = state.attributes.get(ATTR_TEMPERATURE)
-                    try:
-                        current_temp = float(current_temp)
-                    except (TypeError, ValueError):
-                        current_temp = None
-                    if (
-                        state.state == HVACMode.HEAT
-                        and current_temp is not None
-                        and abs(current_temp - self._boost_temp) < 0.1
-                    ):
-                        already_on = True
-                elif state.state == STATE_ON:
-                    already_on = True
+        command = TurnBoilerOnCommand(self._boiler_entity, self._boost_temp)
+        result = await self._command_executor.execute(command, propagate=False)
 
-                if already_on:
-                    success = True
-                elif domain == "climate":
-                    if not self.hass.services.has_service(
-                        "climate", SERVICE_SET_TEMPERATURE
-                    ):
-                        _LOGGER.warning(
-                            "Climate service set_temperature unavailable; skipping boiler on"
-                        )
-                        success = False
-                    else:
-                        if self.hass.services.has_service(
-                            "climate", SERVICE_SET_HVAC_MODE
-                        ):
-                            await self.hass.services.async_call(
-                                "climate",
-                                SERVICE_SET_HVAC_MODE,
-                                {
-                                    ATTR_ENTITY_ID: self._boiler_entity,
-                                    "hvac_mode": HVACMode.HEAT,
-                                },
-                                blocking=True,
-                            )
-                        await self.hass.services.async_call(
-                            "climate",
-                            SERVICE_SET_TEMPERATURE,
-                            {
-                                ATTR_ENTITY_ID: self._boiler_entity,
-                                ATTR_TEMPERATURE: self._boost_temp,
-                            },
-                            blocking=True,
-                        )
-                        success = True
-                else:
-                    await self.hass.services.async_call(
-                        domain,
-                        "turn_on",
-                        {ATTR_ENTITY_ID: self._boiler_entity},
-                        blocking=True,
-                    )
-                    success = True
-        except Exception as err:  # pragma: no cover - defensive
-            _LOGGER.warning("Boiler turn_on failed: %s", err)
-            success = False
-
-        if success:
+        if result.success:
             self._breaker.record_success()
+            return True
+
+        if result.error == "entity unavailable":
+            _LOGGER.warning(
+                "Boiler entity %s unavailable; scheduling retry",
+                self._boiler_entity,
+            )
+        elif result.error == "set_temperature unavailable":
+            _LOGGER.warning(
+                "Climate service set_temperature unavailable; skipping boiler on"
+            )
         else:
-            self._breaker.record_failure(now)
-        return success
+            _LOGGER.warning("Boiler turn_on failed: %s", result.error or "unknown error")
+
+        self._breaker.record_failure(now)
+        return False
 
     async def _turn_boiler_off(self) -> tuple[bool, bool]:
         now = dt_util.utcnow()
@@ -431,73 +368,29 @@ class BoilerCoordinator(DataUpdateCoordinator):
             _LOGGER.debug("Boiler circuit breaker open; skipping turn_off")
             return False, False
 
-        success = False
+        command = TurnBoilerOffCommand(self._boiler_entity, self._off_temp)
+        result = await self._command_executor.execute(command, propagate=False)
         was_on = False
-        try:
-            domain = self._boiler_entity.split(".", 1)[0]
-            state = self.hass.states.get(self._boiler_entity)
-            if state is None or state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
-                _LOGGER.warning(
-                    "Boiler entity %s unavailable; scheduling retry",
-                    self._boiler_entity,
-                )
-                success = False
-            else:
-                if domain == "climate":
-                    was_on = state.state == HVACMode.HEAT
-                else:
-                    was_on = state.state == STATE_ON
+        if result.data and "was_on" in result.data:
+            was_on = bool(result.data["was_on"])
 
-                if domain == "climate":
-                    if not self.hass.services.has_service(
-                        "climate", SERVICE_SET_TEMPERATURE
-                    ):
-                        _LOGGER.warning(
-                            "Climate service set_temperature unavailable; skipping boiler off"
-                        )
-                        success = False
-                    else:
-                        state = self.hass.states.get(self._boiler_entity)
-                        hvac_modes = []
-                        if state is not None:
-                            hvac_modes = state.attributes.get(ATTR_HVAC_MODES, [])
-                        if HVACMode.OFF in hvac_modes:
-                            if self.hass.services.has_service(
-                                "climate", SERVICE_SET_HVAC_MODE
-                            ):
-                                await self.hass.services.async_call(
-                                    "climate",
-                                    SERVICE_SET_HVAC_MODE,
-                                    {
-                                        ATTR_ENTITY_ID: self._boiler_entity,
-                                        "hvac_mode": HVACMode.OFF,
-                                    },
-                                    blocking=True,
-                                )
-                        await self.hass.services.async_call(
-                            "climate",
-                            SERVICE_SET_TEMPERATURE,
-                            {
-                                ATTR_ENTITY_ID: self._boiler_entity,
-                                ATTR_TEMPERATURE: self._off_temp,
-                            },
-                            blocking=True,
-                        )
-                        success = True
-                else:
-                    await self.hass.services.async_call(
-                        domain,
-                        "turn_off",
-                        {ATTR_ENTITY_ID: self._boiler_entity},
-                        blocking=True,
-                    )
-                    success = True
-        except Exception as err:  # pragma: no cover - defensive
-            _LOGGER.warning("Boiler turn_off failed: %s", err)
-            success = False
-
-        if success:
+        if result.success:
             self._breaker.record_success()
+            return True, was_on
+
+        if result.error == "entity unavailable":
+            _LOGGER.warning(
+                "Boiler entity %s unavailable; scheduling retry",
+                self._boiler_entity,
+            )
+        elif result.error == "set_temperature unavailable":
+            _LOGGER.warning(
+                "Climate service set_temperature unavailable; skipping boiler off"
+            )
         else:
-            self._breaker.record_failure(now)
-        return success, was_on
+            _LOGGER.warning(
+                "Boiler turn_off failed: %s", result.error or "unknown error"
+            )
+
+        self._breaker.record_failure(now)
+        return False, was_on
