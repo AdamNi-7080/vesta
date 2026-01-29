@@ -37,6 +37,18 @@ async def async_setup_entry(hass: HomeAssistant, entry) -> bool:
     data["config"] = {**entry.data, **entry.options}
     data["entry_id"] = entry.entry_id
 
+    label_reg = lr.async_get(hass)
+    label_defs = (
+        ("vesta_ignore", "#db4c4c", "mdi:eye-off"),
+        ("vesta_include", "#4caf50", "mdi:check"),
+    )
+    existing_labels = {
+        label.name.lower() for label in label_reg.labels.values()
+    }
+    for name, color, icon in label_defs:
+        if name not in existing_labels:
+            label_reg.async_create(name=name, color=color, icon=icon)
+
     data["areas"] = _discover_areas(hass, entry.data)
 
     learning = VestaLearning(hass)
