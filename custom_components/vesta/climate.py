@@ -81,6 +81,7 @@ from .const import (
 
 BOOST_DURATION = timedelta(minutes=90)
 WINDOW_HOLD_DURATION = timedelta(minutes=15)
+OUTPUT_UPDATE_DEBOUNCE = timedelta(seconds=5)
 CALENDAR_POLL_INTERVAL = timedelta(minutes=15)
 VALVE_MAINTENANCE_HIGH = 30.0
 VALVE_MAINTENANCE_LOW = 5.0
@@ -206,6 +207,7 @@ class VestaClimate(ClimateEntity, RestoreEntity):
         self._idle_start_temp: float | None = None
         self._last_trv_warning: dt_util.dt.datetime | None = None
         self._retry_unsub = None
+        self._output_update_unsub = None
         self._startup_done = False
 
         self._window_manager = WindowManager(
@@ -303,7 +305,29 @@ class VestaClimate(ClimateEntity, RestoreEntity):
         self._fire_event(TYPE_WINDOW)
 
     async def _handle_window_hold_cleared(self) -> None:
-        await self._apply_output()
+        self._schedule_output_update(immediate=True, immediate_demand=True)
+
+    def _schedule_output_update(
+        self, *, immediate: bool = False, immediate_demand: bool = False
+    ) -> None:
+        if immediate:
+            if self._output_update_unsub:
+                self._output_update_unsub()
+                self._output_update_unsub = None
+            self.hass.async_create_task(
+                self._apply_output(immediate_demand=immediate_demand)
+            )
+            return
+        if self._output_update_unsub:
+            return
+
+        async def _run(_now):
+            self._output_update_unsub = None
+            await self._apply_output()
+
+        self._output_update_unsub = async_call_later(
+            self.hass, OUTPUT_UPDATE_DEBOUNCE.total_seconds(), _run
+        )
 
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
@@ -368,7 +392,7 @@ class VestaClimate(ClimateEntity, RestoreEntity):
             )
             self._unsubs.append(self._maintenance_unsub)
 
-        await self._apply_output()
+        await self._apply_output(immediate_demand=True)
 
     async def async_will_remove_from_hass(self) -> None:
         for unsub in self._unsubs:
@@ -379,6 +403,9 @@ class VestaClimate(ClimateEntity, RestoreEntity):
         if self._retry_unsub:
             self._retry_unsub()
             self._retry_unsub = None
+        if self._output_update_unsub:
+            self._output_update_unsub()
+            self._output_update_unsub = None
         self._window_manager.async_will_remove_from_hass()
         self._cancel_preheat()
         if self._maintenance_task:
@@ -406,7 +433,7 @@ class VestaClimate(ClimateEntity, RestoreEntity):
         else:
             self._clear_override()
 
-        await self._apply_output()
+        await self._apply_output(immediate_demand=True)
 
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
         if self._battery_lock:
@@ -418,7 +445,7 @@ class VestaClimate(ClimateEntity, RestoreEntity):
         self._user_hvac_off = hvac_mode == HVACMode.OFF
         if self._user_hvac_off:
             self._cancel_preheat()
-        await self._apply_output()
+        await self._apply_output(immediate_demand=True)
 
     async def _handle_schedule(self, event) -> None:
         if event.data.get("area_id") != self._zone_id:
@@ -447,21 +474,28 @@ class VestaClimate(ClimateEntity, RestoreEntity):
         self._cancel_preheat()
         if isinstance(self._override_mode, SaveTargetMode):
             self._clear_override()
-        await self._apply_output()
+        await self._apply_output(immediate_demand=True)
 
     async def _handle_state_change(self, event) -> None:
         entity_id = event.data.get("entity_id")
+        immediate = False
         if entity_id in self._temp_sensors or entity_id in self._trvs:
             await self._update_current_temperature()
         elif entity_id in self._humidity_sensors:
             await self._update_current_humidity()
         elif self._window_manager.handles(entity_id):
             self._window_manager.refresh_state()
+            immediate = True
         elif entity_id in self._battery_sensors:
-            await self._refresh_battery_state()
+            if await self._refresh_battery_state():
+                immediate = True
+            else:
+                return
         elif self._presence_manager.handles(entity_id):
             self._presence_manager.refresh_state()
-        await self._apply_output()
+        self._schedule_output_update(
+            immediate=immediate, immediate_demand=immediate
+        )
 
     async def _load_schedule_target(self) -> None:
         state = self.hass.states.get(self._schedule_entity_id)
@@ -514,9 +548,9 @@ class VestaClimate(ClimateEntity, RestoreEntity):
         else:
             self._current_humidity = None
 
-    async def _refresh_battery_state(self) -> None:
+    async def _refresh_battery_state(self) -> bool:
         if not self._battery_sensors:
-            return
+            return False
         low = False
         for entity_id in self._battery_sensors:
             value = _state_to_float(self.hass.states.get(entity_id))
@@ -525,8 +559,10 @@ class VestaClimate(ClimateEntity, RestoreEntity):
             if value < BATTERY_THRESHOLD:
                 low = True
                 break
+        changed = False
         if low and not self._battery_lock:
             self._battery_lock = True
+            changed = True
             self._cancel_preheat()
             if self._maintenance_task:
                 self._maintenance_task.cancel()
@@ -537,8 +573,9 @@ class VestaClimate(ClimateEntity, RestoreEntity):
             )
         elif not low and self._battery_lock:
             self._battery_lock = False
+            changed = True
             await self._load_schedule_target()
-            await self._apply_output()
+        return changed
 
     def _set_boost_override(self, target: float) -> None:
         self._cancel_preheat()
@@ -549,7 +586,9 @@ class VestaClimate(ClimateEntity, RestoreEntity):
         async def _expire(_now):
             self._boost_unsub = None
             self._clear_override()
-            await self._apply_output()
+            self._schedule_output_update(
+                immediate=True, immediate_demand=True
+            )
 
         self._boost_unsub = async_call_later(
             self.hass, BOOST_DURATION.total_seconds(), _expire
@@ -622,7 +661,7 @@ class VestaClimate(ClimateEntity, RestoreEntity):
         delay = (effective_at - now).total_seconds()
         if delay <= 0:
             self._schedule_target = target
-            await self._apply_output()
+            await self._apply_output(immediate_demand=True)
             return
 
         async def _apply_future(_now):
@@ -687,7 +726,7 @@ class VestaClimate(ClimateEntity, RestoreEntity):
             await asyncio.sleep(VALVE_MAINTENANCE_STEP)
         finally:
             self._maintenance_active = False
-            await self._apply_output()
+            await self._apply_output(immediate_demand=True)
 
     async def _poll_calendar(self, _now) -> None:
         if not self._calendar_handler:
@@ -723,7 +762,7 @@ class VestaClimate(ClimateEntity, RestoreEntity):
         self._preheat_target = target
         self._preheat_effective_at = effective_at
         self._fire_event(TYPE_PREHEAT, {"target": target})
-        await self._apply_output()
+        await self._apply_output(immediate_demand=True)
 
     async def _apply_future_target(
         self, target: float, effective_at: dt_util.dt.datetime
@@ -742,7 +781,7 @@ class VestaClimate(ClimateEntity, RestoreEntity):
             blocking=False,
         )
 
-        await self._apply_output()
+        await self._apply_output(immediate_demand=True)
 
     def _cancel_preheat(self) -> None:
         if self._preheat_start_unsub:
@@ -833,7 +872,7 @@ class VestaClimate(ClimateEntity, RestoreEntity):
 
         async def _retry(_now):
             self._retry_unsub = None
-            await self._apply_output()
+            await self._apply_output(immediate_demand=True)
 
         self._retry_unsub = async_call_later(self.hass, 30, _retry)
 
@@ -860,16 +899,16 @@ class VestaClimate(ClimateEntity, RestoreEntity):
             "second": DEFAULT_MAINTENANCE_TIME.second,
         }
 
-    async def _apply_output(self) -> None:
+    async def _apply_output(self, *, immediate_demand: bool = False) -> None:
         valid_trvs = self._get_valid_trvs() if self._trvs else []
         if self._battery_lock:
             if self._trvs and not valid_trvs:
                 self._warn_no_trvs()
-                await self._update_demand(None)
+                await self._update_demand(None, immediate=immediate_demand)
                 self.async_write_ha_state()
                 return
             await self._set_trvs_temp(FAILSAFE_TEMP)
-            await self._update_demand(None)
+            await self._update_demand(None, immediate=immediate_demand)
             self.async_write_ha_state()
             return
 
@@ -884,7 +923,7 @@ class VestaClimate(ClimateEntity, RestoreEntity):
             if not valid_trvs:
                 self._warn_no_trvs()
                 self._schedule_apply_retry()
-                await self._update_demand(target)
+                await self._update_demand(target, immediate=immediate_demand)
                 self.async_write_ha_state()
                 return
             if self._retry_unsub:
@@ -934,7 +973,7 @@ class VestaClimate(ClimateEntity, RestoreEntity):
                     blocking=True,
                 )
 
-        await self._update_demand(target)
+        await self._update_demand(target, immediate=immediate_demand)
         self.async_write_ha_state()
 
     async def _set_trvs_temp(self, temperature: float) -> None:
@@ -957,7 +996,9 @@ class VestaClimate(ClimateEntity, RestoreEntity):
             blocking=True,
         )
 
-    async def _update_demand(self, target: float | None) -> None:
+    async def _update_demand(
+        self, target: float | None, *, immediate: bool = False
+    ) -> None:
         demand = False
         if not self._is_forced_off() and target is not None:
             if (
@@ -1002,7 +1043,9 @@ class VestaClimate(ClimateEntity, RestoreEntity):
                 self._demand_since = None
                 self._demand_start_temp = None
             self._demand = demand
-            await self._coordinator.async_update_demand(self._zone_id, demand)
+            await self._coordinator.async_update_demand(
+                self._zone_id, demand, immediate=immediate
+            )
         else:
             if demand and self._demand_since is None:
                 if self._current_temperature is not None:

@@ -40,6 +40,7 @@ _LOGGER = logging.getLogger(__name__)
 
 MASTER_SWITCH_ENTITY = "switch.vesta_master_heating"
 FAILSAFE_RETRY_SECONDS = 60
+DEMAND_UPDATE_DEBOUNCE_SECONDS = 5
 
 
 class BoilerState(Enum):
@@ -62,25 +63,65 @@ class BoilerCoordinator(DataUpdateCoordinator):
         self._off_temp = config.get(CONF_OFF_TEMP, DEFAULT_OFF_TEMP)
         self._min_cycle = config.get(CONF_MIN_CYCLE, DEFAULT_MIN_CYCLE)
         self._demand: dict[str, bool] = {}
+        self._pending_demand: dict[str, bool] = {}
+        self._demand_update_unsub = None
         self._state = BoilerState.IDLE
         self._cooldown_until: dt_util.dt.datetime | None = None
         self._retry_unsub = None
         self._master_state_warned = False
         self._state_lock = asyncio.Lock()
 
-    async def async_update_demand(self, zone_id: str, demand: bool) -> None:
-        """Update demand from a zone and recalculate boiler state."""
-        if self._demand.get(zone_id) == demand:
+    async def async_update_demand(
+        self, zone_id: str, demand: bool, *, immediate: bool = False
+    ) -> None:
+        """Update demand from a zone, optionally batching updates."""
+        self._pending_demand[zone_id] = demand
+        if immediate:
+            self._cancel_demand_update()
+            if self._apply_pending_demand_updates():
+                await self._recalculate()
             return
-        self._demand[zone_id] = demand
-        await self._recalculate()
+        self._schedule_demand_update()
 
     async def async_recalculate(self) -> None:
         """Public method to force a recalculation."""
         await self._recalculate()
 
+    def _cancel_demand_update(self) -> None:
+        if self._demand_update_unsub is None:
+            return
+        self._demand_update_unsub()
+        self._demand_update_unsub = None
+
+    def _schedule_demand_update(self) -> None:
+        if self._demand_update_unsub is not None:
+            return
+
+        async def _flush(_now):
+            self._demand_update_unsub = None
+            if self._apply_pending_demand_updates():
+                await self._recalculate()
+
+        self._demand_update_unsub = async_call_later(
+            self.hass, DEMAND_UPDATE_DEBOUNCE_SECONDS, _flush
+        )
+
+    def _apply_pending_demand_updates(self) -> bool:
+        if not self._pending_demand:
+            return False
+        changed = False
+        for zone_id, demand in self._pending_demand.items():
+            if self._demand.get(zone_id) != demand:
+                changed = True
+            self._demand[zone_id] = demand
+        self._pending_demand.clear()
+        return changed
+
     async def _recalculate(self) -> None:
         async with self._state_lock:
+            if self._pending_demand:
+                self._cancel_demand_update()
+                self._apply_pending_demand_updates()
             master_state = self.hass.states.get(MASTER_SWITCH_ENTITY)
             if master_state is None or master_state.state in (
                 STATE_UNAVAILABLE,
