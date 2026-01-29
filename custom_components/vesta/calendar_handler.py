@@ -215,7 +215,7 @@ def _event_target(event: dict) -> float | None:
     if not isinstance(event, dict):
         return None
     text = event.get("summary") or event.get("description") or ""
-    match = re.search(r"-?\\d+(?:\\.\\d+)?", str(text))
+    match = re.search(r"-?\d+(?:\.\d+)?", str(text))
     if not match:
         return None
     try:
