@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import math
 from datetime import datetime, timedelta
 import logging
 import re
@@ -22,7 +21,6 @@ from homeassistant.const import (
     CONF_DEVICE_ID,
     CONF_TYPE,
     EVENT_HOMEASSISTANT_START,
-    STATE_HOME,
     STATE_ON,
     STATE_OFF,
     STATE_UNAVAILABLE,
@@ -44,6 +42,7 @@ from .domain.climate import (
     calculate_temperature_compensation,
     compute_preheat_start,
 )
+from .manager import PresenceManager, WindowManager
 from .const import (
     CONF_COMFORT_TEMP,
     CONF_MAINTENANCE_DAY,
@@ -178,9 +177,6 @@ class VestaClimate(ClimateEntity, RestoreEntity):
         self._override_expires = None
         self._user_hvac_off = False
 
-        self._window_open = False
-        self._window_hold_until = None
-        self._window_hold_unsub = None
         self._boost_unsub = None
         self._preheat_start_unsub = None
         self._preheat_apply_unsub = None
@@ -188,8 +184,6 @@ class VestaClimate(ClimateEntity, RestoreEntity):
         self._maintenance_task = None
         self._maintenance_active = False
 
-        self._presence_on = False
-        self._temp_history: list[tuple[dt_util.dt.datetime, float]] = []
         self._demand = False
         self._preheat_active = False
         self._preheat_target: float | None = None
@@ -209,6 +203,25 @@ class VestaClimate(ClimateEntity, RestoreEntity):
         self._last_trv_warning: dt_util.dt.datetime | None = None
         self._retry_unsub = None
         self._startup_done = False
+
+        self._window_manager = WindowManager(
+            hass,
+            window_sensors=self._window_sensors,
+            window_threshold=self._window_threshold,
+            hold_duration=WINDOW_HOLD_DURATION,
+            on_hold_cleared=self._handle_window_hold_cleared,
+            on_hold_triggered=self._handle_window_hold_triggered,
+        )
+        self._presence_manager = PresenceManager(
+            hass,
+            area_name=self._area_name,
+            slug=self._slug,
+            presence_sensors=self._presence_sensors,
+            distance_sensors=self._distance_sensors,
+            bermuda_threshold=self._bermuda_threshold,
+            guest_entity_id=GUEST_SWITCH,
+            home_entity_id=HOME_ZONE,
+        )
 
         self._unsubs: list[callable] = []
 
@@ -277,6 +290,12 @@ class VestaClimate(ClimateEntity, RestoreEntity):
             payload.update(data)
         self.hass.bus.async_fire(DOMAIN_EVENT, payload)
 
+    def _handle_window_hold_triggered(self) -> None:
+        self._fire_event(TYPE_WINDOW)
+
+    async def _handle_window_hold_cleared(self) -> None:
+        await self._apply_output()
+
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
         self._unsubs.append(
@@ -286,12 +305,11 @@ class VestaClimate(ClimateEntity, RestoreEntity):
         tracked = set(
             self._temp_sensors
             + self._humidity_sensors
-            + self._window_sensors
-            + self._presence_sensors
-            + self._distance_sensors
             + self._battery_sensors
             + self._trvs
-            + [GUEST_SWITCH, MASTER_SWITCH, ECO_NUMBER, HOME_ZONE]
+            + [MASTER_SWITCH, ECO_NUMBER]
+            + self._window_manager.tracked_entities()
+            + self._presence_manager.tracked_entities()
         )
         if tracked:
             self._unsubs.append(
@@ -314,8 +332,8 @@ class VestaClimate(ClimateEntity, RestoreEntity):
         self._startup_done = True
 
         await self._load_schedule_target()
-        self._refresh_presence()
-        self._refresh_window_state()
+        self._presence_manager.refresh_state()
+        self._window_manager.refresh_state()
         await self._refresh_battery_state()
         await self._update_current_temperature()
         await self._update_current_humidity()
@@ -352,9 +370,7 @@ class VestaClimate(ClimateEntity, RestoreEntity):
         if self._retry_unsub:
             self._retry_unsub()
             self._retry_unsub = None
-        if self._window_hold_unsub:
-            self._window_hold_unsub()
-            self._window_hold_unsub = None
+        self._window_manager.async_will_remove_from_hass()
         self._cancel_preheat()
         if self._maintenance_task:
             self._maintenance_task.cancel()
@@ -430,15 +446,12 @@ class VestaClimate(ClimateEntity, RestoreEntity):
             await self._update_current_temperature()
         elif entity_id in self._humidity_sensors:
             await self._update_current_humidity()
-        elif entity_id in self._window_sensors:
-            self._refresh_window_state()
+        elif self._window_manager.handles(entity_id):
+            self._window_manager.refresh_state()
         elif entity_id in self._battery_sensors:
             await self._refresh_battery_state()
-        elif entity_id in self._distance_sensors or entity_id in self._presence_sensors or entity_id in (
-            GUEST_SWITCH,
-            HOME_ZONE,
-        ):
-            self._refresh_presence()
+        elif self._presence_manager.handles(entity_id):
+            self._presence_manager.refresh_state()
         await self._apply_output()
 
     async def _load_schedule_target(self) -> None:
@@ -474,7 +487,7 @@ class VestaClimate(ClimateEntity, RestoreEntity):
         if temps:
             self._current_temperature = sum(temps) / len(temps)
             if not self._window_sensors:
-                self._record_temperature(self._current_temperature)
+                self._window_manager.record_temperature(self._current_temperature)
 
     async def _update_current_humidity(self) -> None:
         if not self._humidity_sensors:
@@ -491,80 +504,6 @@ class VestaClimate(ClimateEntity, RestoreEntity):
             self._current_humidity = sum(humidities) / len(humidities)
         else:
             self._current_humidity = None
-
-    def _record_temperature(self, temperature: float) -> None:
-        now = dt_util.utcnow()
-        self._temp_history.append((now, temperature))
-        cutoff = now - timedelta(minutes=3)
-        self._temp_history = [
-            (ts, temp) for ts, temp in self._temp_history if ts >= cutoff
-        ]
-        if len(self._temp_history) < 2:
-            return
-
-        oldest_ts, oldest_temp = self._temp_history[0]
-        minutes = (now - oldest_ts).total_seconds() / 60
-        if minutes <= 0:
-            return
-        drop = oldest_temp - temperature
-        rate = drop / minutes
-        if drop >= 0.5 or rate >= self._window_threshold:
-            self._trigger_window_hold()
-
-    def _trigger_window_hold(self) -> None:
-        self._window_hold_until = dt_util.utcnow() + WINDOW_HOLD_DURATION
-        if self._window_hold_unsub:
-            self._window_hold_unsub()
-
-        async def _clear_hold(_now):
-            self._window_hold_unsub = None
-            self._window_hold_until = None
-            await self._apply_output()
-
-        self._window_hold_unsub = async_call_later(
-            self.hass, WINDOW_HOLD_DURATION.total_seconds(), _clear_hold
-        )
-        self._fire_event(TYPE_WINDOW)
-
-    def _refresh_window_state(self) -> None:
-        self._window_open = any(
-            self.hass.states.get(entity_id).state == STATE_ON
-            for entity_id in self._window_sensors
-            if self.hass.states.get(entity_id) is not None
-        )
-
-    def _refresh_presence(self) -> None:
-        guest_mode = self._is_guest_mode()
-        zone_home = self._is_home() or guest_mode
-        previous_presence = self._presence_on
-        self._presence_on = False
-        if not zone_home:
-            return
-        if self._distance_sensors:
-            hysteresis = 0.5 if previous_presence else 0.0
-            for entity_id in self._distance_sensors:
-                value = _state_to_float(self.hass.states.get(entity_id))
-                if value is None or not math.isfinite(value):
-                    continue
-                if value < self._bermuda_threshold + hysteresis:
-                    self._presence_on = True
-                    return
-
-        for entity_id in self._presence_sensors:
-            state = self.hass.states.get(entity_id)
-            if state is None:
-                continue
-            if entity_id.startswith("binary_sensor."):
-                if state.state in (STATE_ON, STATE_HOME):
-                    self._presence_on = True
-                    return
-                continue
-            if state.state in (STATE_UNKNOWN, STATE_UNAVAILABLE):
-                continue
-            state_value = str(state.state).casefold()
-            if state_value in (self._area_name.casefold(), self._slug.casefold()):
-                self._presence_on = True
-                return
 
     async def _refresh_battery_state(self) -> None:
         if not self._battery_sensors:
@@ -626,19 +565,6 @@ class VestaClimate(ClimateEntity, RestoreEntity):
         self._override_target = None
         self._override_expires = None
 
-    def _is_home(self) -> bool:
-        state = self.hass.states.get(HOME_ZONE)
-        if state is None or state.state in (STATE_UNKNOWN, STATE_UNAVAILABLE):
-            return False
-        try:
-            return int(float(state.state)) > 0
-        except (TypeError, ValueError):
-            return False
-
-    def _is_guest_mode(self) -> bool:
-        state = self.hass.states.get(GUEST_SWITCH)
-        return state is not None and state.state == STATE_ON
-
     def _is_master_enabled(self) -> bool:
         state = self.hass.states.get(MASTER_SWITCH)
         return state is None or state.state == STATE_ON
@@ -650,9 +576,7 @@ class VestaClimate(ClimateEntity, RestoreEntity):
             return True
         if self._user_hvac_off:
             return True
-        if self._window_open:
-            return True
-        if self._window_hold_until and dt_util.utcnow() < self._window_hold_until:
+        if self._window_manager.is_forced_off(dt_util.utcnow()):
             return True
         return False
 
@@ -668,12 +592,12 @@ class VestaClimate(ClimateEntity, RestoreEntity):
         if schedule_target is None:
             schedule_target = self._off_temp
 
-        if not self._is_guest_mode() and not self._is_home():
+        if not self._presence_manager.is_guest_mode() and not self._presence_manager.is_home():
             schedule_target = self._eco_temp()
 
         if (
             self._presence_sensors
-            and self._presence_on
+            and self._presence_manager.is_present()
             and schedule_target <= self._off_temp
         ):
             schedule_target = max(schedule_target, self._comfort_temp)
@@ -702,7 +626,10 @@ class VestaClimate(ClimateEntity, RestoreEntity):
             self.hass, delay, _apply_future
         )
 
-        allow_preheat = self._is_home() or self._is_guest_mode()
+        allow_preheat = (
+            self._presence_manager.is_home()
+            or self._presence_manager.is_guest_mode()
+        )
         rate = 0.0
         if allow_preheat:
             rate = self._learning.get_rate(
