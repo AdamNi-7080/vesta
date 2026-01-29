@@ -41,6 +41,8 @@ _LOGGER = logging.getLogger(__name__)
 MASTER_SWITCH_ENTITY = "switch.vesta_master_heating"
 FAILSAFE_RETRY_SECONDS = 60
 DEMAND_UPDATE_DEBOUNCE_SECONDS = 5
+CIRCUIT_BREAKER_FAILURES = 3
+CIRCUIT_BREAKER_RESET_SECONDS = 300
 
 
 class BoilerState(Enum):
@@ -50,6 +52,72 @@ class BoilerState(Enum):
     ANTI_CYCLE = "anti_cycle_cooldown"
     FIRING = "firing"
     FAILSAFE = "failsafe"
+
+
+class CircuitBreakerState(Enum):
+    """Circuit breaker states for boiler service calls."""
+
+    CLOSED = "closed"
+    OPEN = "open"
+    HALF_OPEN = "half_open"
+
+
+class CircuitBreaker:
+    """Simple circuit breaker for boiler service calls."""
+
+    def __init__(self, *, failure_threshold: int, reset_timeout: timedelta) -> None:
+        self._failure_threshold = max(1, failure_threshold)
+        self._reset_timeout = reset_timeout
+        self._state = CircuitBreakerState.CLOSED
+        self._failure_count = 0
+        self._opened_until: dt_util.dt.datetime | None = None
+        self._half_open_in_flight = False
+
+    def can_attempt(self, now: dt_util.dt.datetime) -> bool:
+        if self._state == CircuitBreakerState.OPEN:
+            if self._opened_until is not None and now >= self._opened_until:
+                self._state = CircuitBreakerState.HALF_OPEN
+                self._half_open_in_flight = False
+            else:
+                return False
+        if self._state == CircuitBreakerState.HALF_OPEN:
+            if self._half_open_in_flight:
+                return False
+            self._half_open_in_flight = True
+            return True
+        return True
+
+    def record_success(self) -> None:
+        if self._state != CircuitBreakerState.CLOSED:
+            _LOGGER.info("Boiler circuit breaker closed after successful call")
+        self._state = CircuitBreakerState.CLOSED
+        self._failure_count = 0
+        self._opened_until = None
+        self._half_open_in_flight = False
+
+    def record_failure(self, now: dt_util.dt.datetime) -> None:
+        if self._state == CircuitBreakerState.HALF_OPEN:
+            self._open(now, reason="half-open test failed")
+            return
+        self._failure_count += 1
+        if self._failure_count >= self._failure_threshold:
+            self._open(now, reason="failure threshold reached")
+
+    def next_attempt_in(self, now: dt_util.dt.datetime) -> float:
+        if self._state != CircuitBreakerState.OPEN or self._opened_until is None:
+            return 0.0
+        return max(0.0, (self._opened_until - now).total_seconds())
+
+    def _open(self, now: dt_util.dt.datetime, *, reason: str) -> None:
+        self._state = CircuitBreakerState.OPEN
+        self._opened_until = now + self._reset_timeout
+        self._failure_count = 0
+        self._half_open_in_flight = False
+        _LOGGER.warning(
+            "Boiler circuit breaker opened (%s); retrying after %.0fs",
+            reason,
+            self._reset_timeout.total_seconds(),
+        )
 
 
 class BoilerCoordinator(DataUpdateCoordinator):
@@ -67,6 +135,10 @@ class BoilerCoordinator(DataUpdateCoordinator):
         self._demand_update_unsub = None
         self._state = BoilerState.IDLE
         self._cooldown_until: dt_util.dt.datetime | None = None
+        self._breaker = CircuitBreaker(
+            failure_threshold=CIRCUIT_BREAKER_FAILURES,
+            reset_timeout=timedelta(seconds=CIRCUIT_BREAKER_RESET_SECONDS),
+        )
         self._retry_unsub = None
         self._master_state_warned = False
         self._state_lock = asyncio.Lock()
@@ -198,14 +270,14 @@ class BoilerCoordinator(DataUpdateCoordinator):
 
     async def _ensure_boiler_on(self, now: dt_util.dt.datetime) -> None:
         remaining = self._cooldown_remaining(now)
-        if remaining > 0:
-            if self._state == BoilerState.FAILSAFE:
-                self._schedule_retry(
-                    min(remaining, FAILSAFE_RETRY_SECONDS), replace=True
-                )
-            else:
+        breaker_delay = self._breaker.next_attempt_in(now)
+        delay = max(remaining, breaker_delay)
+        if delay > 0:
+            if breaker_delay > 0:
+                self._state = BoilerState.FAILSAFE
+            elif self._state != BoilerState.FAILSAFE:
                 self._state = BoilerState.ANTI_CYCLE
-                self._schedule_retry(remaining)
+            self._schedule_retry(delay, replace=True)
             return
         if self._state == BoilerState.ANTI_CYCLE:
             self._cooldown_until = None
@@ -218,17 +290,17 @@ class BoilerCoordinator(DataUpdateCoordinator):
             return
 
         self._state = BoilerState.FAILSAFE
-        self._schedule_retry(FAILSAFE_RETRY_SECONDS, replace=True)
+        self._schedule_retry(self._failsafe_delay(now), replace=True)
 
     async def _ensure_boiler_off(self, *, force: bool = False) -> None:
+        now = dt_util.utcnow()
         success, was_on = await self._turn_boiler_off()
         if not success:
             self._state = BoilerState.FAILSAFE
-            self._schedule_retry(FAILSAFE_RETRY_SECONDS, replace=True)
+            self._schedule_retry(self._failsafe_delay(now), replace=True)
             return
 
         self._cancel_retry()
-        now = dt_util.utcnow()
         if was_on or force or self._state == BoilerState.FIRING:
             self._enter_cooldown(now)
             return
@@ -241,113 +313,167 @@ class BoilerCoordinator(DataUpdateCoordinator):
             return
         self._update_cooldown_state(now)
 
+    def _failsafe_delay(self, now: dt_util.dt.datetime) -> float:
+        breaker_delay = self._breaker.next_attempt_in(now)
+        return breaker_delay if breaker_delay > 0 else FAILSAFE_RETRY_SECONDS
+
     async def _turn_boiler_on(self) -> bool:
-        domain = self._boiler_entity.split(".", 1)[0]
-        state = self.hass.states.get(self._boiler_entity)
-        if state is None or state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
-            _LOGGER.warning(
-                "Boiler entity %s unavailable; scheduling retry",
-                self._boiler_entity,
-            )
+        now = dt_util.utcnow()
+        if not self._breaker.can_attempt(now):
+            _LOGGER.debug("Boiler circuit breaker open; skipping turn_on")
             return False
 
-        already_on = False
-        if domain == "climate":
-            current_temp = state.attributes.get(ATTR_TEMPERATURE)
-            try:
-                current_temp = float(current_temp)
-            except (TypeError, ValueError):
-                current_temp = None
-            if (
-                state.state == HVACMode.HEAT
-                and current_temp is not None
-                and abs(current_temp - self._boost_temp) < 0.1
-            ):
-                already_on = True
-        elif state.state == STATE_ON:
-            already_on = True
-
-        if already_on:
-            return True
-        if domain == "climate":
-            if not self.hass.services.has_service("climate", SERVICE_SET_TEMPERATURE):
-                _LOGGER.warning(
-                    "Climate service set_temperature unavailable; skipping boiler on"
-                )
-                return False
-            if self.hass.services.has_service("climate", SERVICE_SET_HVAC_MODE):
-                await self.hass.services.async_call(
-                    "climate",
-                    SERVICE_SET_HVAC_MODE,
-                    {ATTR_ENTITY_ID: self._boiler_entity, "hvac_mode": HVACMode.HEAT},
-                    blocking=True,
-                )
-            await self.hass.services.async_call(
-                "climate",
-                SERVICE_SET_TEMPERATURE,
-                {
-                    ATTR_ENTITY_ID: self._boiler_entity,
-                    ATTR_TEMPERATURE: self._boost_temp,
-                },
-                blocking=True,
-            )
-        else:
-            await self.hass.services.async_call(
-                domain,
-                "turn_on",
-                {ATTR_ENTITY_ID: self._boiler_entity},
-                blocking=True,
-            )
-        return True
-
-    async def _turn_boiler_off(self) -> tuple[bool, bool]:
-        domain = self._boiler_entity.split(".", 1)[0]
-        state = self.hass.states.get(self._boiler_entity)
-        if state is None or state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
-            _LOGGER.warning(
-                "Boiler entity %s unavailable; scheduling retry",
-                self._boiler_entity,
-            )
-            return False, False
-
-        was_on = False
-        if domain == "climate":
-            was_on = state.state == HVACMode.HEAT
-        else:
-            was_on = state.state == STATE_ON
-
-        if domain == "climate":
-            if not self.hass.services.has_service("climate", SERVICE_SET_TEMPERATURE):
-                _LOGGER.warning(
-                    "Climate service set_temperature unavailable; skipping boiler off"
-                )
-                return False, was_on
+        success = False
+        try:
+            domain = self._boiler_entity.split(".", 1)[0]
             state = self.hass.states.get(self._boiler_entity)
-            hvac_modes = []
-            if state is not None:
-                hvac_modes = state.attributes.get(ATTR_HVAC_MODES, [])
-            if HVACMode.OFF in hvac_modes:
-                if self.hass.services.has_service("climate", SERVICE_SET_HVAC_MODE):
+            if state is None or state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
+                _LOGGER.warning(
+                    "Boiler entity %s unavailable; scheduling retry",
+                    self._boiler_entity,
+                )
+                success = False
+            else:
+                already_on = False
+                if domain == "climate":
+                    current_temp = state.attributes.get(ATTR_TEMPERATURE)
+                    try:
+                        current_temp = float(current_temp)
+                    except (TypeError, ValueError):
+                        current_temp = None
+                    if (
+                        state.state == HVACMode.HEAT
+                        and current_temp is not None
+                        and abs(current_temp - self._boost_temp) < 0.1
+                    ):
+                        already_on = True
+                elif state.state == STATE_ON:
+                    already_on = True
+
+                if already_on:
+                    success = True
+                elif domain == "climate":
+                    if not self.hass.services.has_service(
+                        "climate", SERVICE_SET_TEMPERATURE
+                    ):
+                        _LOGGER.warning(
+                            "Climate service set_temperature unavailable; skipping boiler on"
+                        )
+                        success = False
+                    else:
+                        if self.hass.services.has_service(
+                            "climate", SERVICE_SET_HVAC_MODE
+                        ):
+                            await self.hass.services.async_call(
+                                "climate",
+                                SERVICE_SET_HVAC_MODE,
+                                {
+                                    ATTR_ENTITY_ID: self._boiler_entity,
+                                    "hvac_mode": HVACMode.HEAT,
+                                },
+                                blocking=True,
+                            )
+                        await self.hass.services.async_call(
+                            "climate",
+                            SERVICE_SET_TEMPERATURE,
+                            {
+                                ATTR_ENTITY_ID: self._boiler_entity,
+                                ATTR_TEMPERATURE: self._boost_temp,
+                            },
+                            blocking=True,
+                        )
+                        success = True
+                else:
                     await self.hass.services.async_call(
-                        "climate",
-                        SERVICE_SET_HVAC_MODE,
-                        {ATTR_ENTITY_ID: self._boiler_entity, "hvac_mode": HVACMode.OFF},
+                        domain,
+                        "turn_on",
+                        {ATTR_ENTITY_ID: self._boiler_entity},
                         blocking=True,
                     )
-            await self.hass.services.async_call(
-                "climate",
-                SERVICE_SET_TEMPERATURE,
-                {
-                    ATTR_ENTITY_ID: self._boiler_entity,
-                    ATTR_TEMPERATURE: self._off_temp,
-                },
-                blocking=True,
-            )
+                    success = True
+        except Exception as err:  # pragma: no cover - defensive
+            _LOGGER.warning("Boiler turn_on failed: %s", err)
+            success = False
+
+        if success:
+            self._breaker.record_success()
         else:
-            await self.hass.services.async_call(
-                domain,
-                "turn_off",
-                {ATTR_ENTITY_ID: self._boiler_entity},
-                blocking=True,
-            )
-        return True, was_on
+            self._breaker.record_failure(now)
+        return success
+
+    async def _turn_boiler_off(self) -> tuple[bool, bool]:
+        now = dt_util.utcnow()
+        if not self._breaker.can_attempt(now):
+            _LOGGER.debug("Boiler circuit breaker open; skipping turn_off")
+            return False, False
+
+        success = False
+        was_on = False
+        try:
+            domain = self._boiler_entity.split(".", 1)[0]
+            state = self.hass.states.get(self._boiler_entity)
+            if state is None or state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
+                _LOGGER.warning(
+                    "Boiler entity %s unavailable; scheduling retry",
+                    self._boiler_entity,
+                )
+                success = False
+            else:
+                if domain == "climate":
+                    was_on = state.state == HVACMode.HEAT
+                else:
+                    was_on = state.state == STATE_ON
+
+                if domain == "climate":
+                    if not self.hass.services.has_service(
+                        "climate", SERVICE_SET_TEMPERATURE
+                    ):
+                        _LOGGER.warning(
+                            "Climate service set_temperature unavailable; skipping boiler off"
+                        )
+                        success = False
+                    else:
+                        state = self.hass.states.get(self._boiler_entity)
+                        hvac_modes = []
+                        if state is not None:
+                            hvac_modes = state.attributes.get(ATTR_HVAC_MODES, [])
+                        if HVACMode.OFF in hvac_modes:
+                            if self.hass.services.has_service(
+                                "climate", SERVICE_SET_HVAC_MODE
+                            ):
+                                await self.hass.services.async_call(
+                                    "climate",
+                                    SERVICE_SET_HVAC_MODE,
+                                    {
+                                        ATTR_ENTITY_ID: self._boiler_entity,
+                                        "hvac_mode": HVACMode.OFF,
+                                    },
+                                    blocking=True,
+                                )
+                        await self.hass.services.async_call(
+                            "climate",
+                            SERVICE_SET_TEMPERATURE,
+                            {
+                                ATTR_ENTITY_ID: self._boiler_entity,
+                                ATTR_TEMPERATURE: self._off_temp,
+                            },
+                            blocking=True,
+                        )
+                        success = True
+                else:
+                    await self.hass.services.async_call(
+                        domain,
+                        "turn_off",
+                        {ATTR_ENTITY_ID: self._boiler_entity},
+                        blocking=True,
+                    )
+                    success = True
+        except Exception as err:  # pragma: no cover - defensive
+            _LOGGER.warning("Boiler turn_off failed: %s", err)
+            success = False
+
+        if success:
+            self._breaker.record_success()
+        else:
+            self._breaker.record_failure(now)
+        return success, was_on
