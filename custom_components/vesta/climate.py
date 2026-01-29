@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta
+from datetime import timedelta
 import logging
-import re
 
 from homeassistant.components.climate import ClimateEntity
 from homeassistant.components.climate.const import (
@@ -38,6 +37,7 @@ from homeassistant.helpers.event import (
 from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.util import dt as dt_util
 
+from .calendar_handler import CalendarHandler, _parse_effective_at
 from .domain.climate import (
     calculate_temperature_compensation,
     compute_preheat_start,
@@ -190,10 +190,6 @@ class VestaClimate(ClimateEntity, RestoreEntity):
         self._preheat_effective_at: dt_util.dt.datetime | None = None
         self._pending_target: float | None = None
         self._pending_effective_at: dt_util.dt.datetime | None = None
-        self._calendar_last_signature: tuple[dt_util.dt.datetime, float] | None = None
-        self._calendar_suppressed_signature: (
-            tuple[dt_util.dt.datetime, float] | None
-        ) = None
         self._battery_lock = False
         self._health_state = "OK"
         self._demand_since: dt_util.dt.datetime | None = None
@@ -221,6 +217,11 @@ class VestaClimate(ClimateEntity, RestoreEntity):
             bermuda_threshold=self._bermuda_threshold,
             guest_entity_id=GUEST_SWITCH,
             home_entity_id=HOME_ZONE,
+        )
+        self._calendar_handler = (
+            CalendarHandler(hass, self._calendar_entity)
+            if self._calendar_entity
+            else None
         )
 
         self._unsubs: list[callable] = []
@@ -338,7 +339,7 @@ class VestaClimate(ClimateEntity, RestoreEntity):
         await self._update_current_temperature()
         await self._update_current_humidity()
 
-        if self._calendar_entity:
+        if self._calendar_handler:
             await self._poll_calendar(None)
             self._unsubs.append(
                 async_track_time_interval(
@@ -683,76 +684,23 @@ class VestaClimate(ClimateEntity, RestoreEntity):
             await self._apply_output()
 
     async def _poll_calendar(self, _now) -> None:
-        if not self._calendar_entity:
-            return
-        if self.hass.states.get(self._calendar_entity) is None:
-            _LOGGER.debug("Calendar entity %s not ready yet", self._calendar_entity)
+        if not self._calendar_handler:
             return
         if self._battery_lock:
             return
         now = dt_util.utcnow()
-        start_search = now - timedelta(hours=24)
-        end = now + timedelta(days=7)
-        events = await self._fetch_calendar_events(start_search, end)
-        _LOGGER.debug(
-            "Calendar fetch: %s events found between %s and %s",
-            len(events),
-            start_search,
-            end,
-        )
-        if not events:
+        decision = await self._calendar_handler.async_poll(now)
+        if decision is None:
             return
-        next_event, is_active = _next_calendar_event(self.hass, now, events)
-        if not next_event:
-            return
-        start = _event_start(self.hass, next_event)
-        if start is None:
-            return
-        end_time = _event_end(self.hass, next_event)
-        if is_active:
-            target = _event_target(next_event)
-            if target is None:
-                return
-            if self._schedule_target != target:
+        if decision.is_active:
+            if self._schedule_target != decision.target:
                 _LOGGER.info(
-                    "Found active calendar event: Setting target to %s", target
+                    "Found active calendar event: Setting target to %s",
+                    decision.target,
                 )
-                await self._apply_future_target(target, now)
+                await self._apply_future_target(decision.target, now)
             return
-        if start <= now:
-            return
-        target = _event_target(next_event)
-        if target is None:
-            return
-
-        signature = (start, target)
-        if self._calendar_suppressed_signature == signature:
-            return
-        if signature == self._calendar_last_signature:
-            return
-
-        self._calendar_last_signature = signature
-        await self._schedule_future_target(target, start)
-
-    async def _fetch_calendar_events(
-        self, start: dt_util.dt.datetime, end: dt_util.dt.datetime
-    ) -> list[dict]:
-        try:
-            response = await self.hass.services.async_call(
-                "calendar",
-                "get_events",
-                {
-                    "entity_id": self._calendar_entity,
-                    "start_date_time": start.isoformat(),
-                    "end_date_time": end.isoformat(),
-                },
-                blocking=True,
-                return_response=True,
-            )
-        except Exception as err:  # pragma: no cover - defensive
-            _LOGGER.warning("Calendar poll failed: %s", err)
-            return []
-        return _extract_calendar_events(response, self._calendar_entity)
+        await self._schedule_future_target(decision.target, decision.start)
 
     async def _start_preheat(
         self, target: float, effective_at: dt_util.dt.datetime
@@ -804,9 +752,8 @@ class VestaClimate(ClimateEntity, RestoreEntity):
         self._pending_effective_at = None
 
     def _suppress_calendar_event(self) -> None:
-        if self._calendar_last_signature is None:
-            return
-        self._calendar_suppressed_signature = self._calendar_last_signature
+        if self._calendar_handler:
+            self._calendar_handler.suppress_last_event()
 
     def _eco_temp(self) -> float:
         state = self.hass.states.get(ECO_NUMBER)
@@ -1099,115 +1046,4 @@ def _state_to_float(state) -> float | None:
     try:
         return float(state.state)
     except (TypeError, ValueError):
-        return None
-
-
-def _parse_effective_at(hass, value) -> dt_util.dt.datetime | None:
-    if value is None:
-        return None
-    if isinstance(value, datetime):
-        dt_value = value
-    else:
-        dt_value = dt_util.parse_datetime(str(value))
-        if dt_value is None:
-            return None
-    if dt_value.tzinfo is None:
-        tz = dt_util.get_time_zone(hass.config.time_zone)
-        dt_value = dt_value.replace(tzinfo=tz)
-    return dt_util.as_utc(dt_value)
-
-
-def _extract_calendar_events(response, entity_id: str | None) -> list[dict]:
-    if not response:
-        return []
-    if isinstance(response, dict):
-        if isinstance(response.get("events"), list):
-            return response["events"]
-        if entity_id and entity_id in response:
-            data = response[entity_id]
-            if isinstance(data, dict) and isinstance(data.get("events"), list):
-                return data["events"]
-            if isinstance(data, list):
-                return data
-    if isinstance(response, list):
-        return response
-    return []
-
-
-def _next_calendar_event(
-    hass, now: dt_util.dt.datetime, events: list[dict]
-) -> tuple[dict | None, bool]:
-    active_event = None
-    active_start = None
-    next_event = None
-    next_start = None
-    for event in events:
-        start = _event_start(hass, event)
-        if start is None:
-            continue
-        end = _event_end(hass, event)
-        if end is not None and end <= now:
-            continue
-        if start <= now and (end is None or now < end):
-            if active_start is None or start < active_start:
-                active_start = start
-                active_event = event
-            continue
-        if start > now:
-            if next_start is None or start < next_start:
-                next_start = start
-                next_event = event
-    if active_event is not None:
-        return active_event, True
-    return next_event, False
-
-
-def _event_end(hass, event: dict) -> dt_util.dt.datetime | None:
-    if not isinstance(event, dict):
-        return None
-    end = event.get("end")
-    if isinstance(end, dict):
-        end = end.get("dateTime") or end.get("date")
-    if end is None:
-        end = event.get("end_time")
-    dt_value = _parse_effective_at(hass, end)
-    if dt_value is not None:
-        return dt_value
-    date_value = dt_util.parse_date(str(end)) if end is not None else None
-    if date_value is None:
-        return None
-    tz = dt_util.get_time_zone(hass.config.time_zone)
-    dt_value = datetime.combine(date_value, datetime.min.time()).replace(tzinfo=tz)
-    return dt_util.as_utc(dt_value)
-
-
-def _event_start(hass, event: dict) -> dt_util.dt.datetime | None:
-    if not isinstance(event, dict):
-        return None
-    start = event.get("start")
-    if isinstance(start, dict):
-        start = start.get("dateTime") or start.get("date")
-    if start is None:
-        start = event.get("start_time")
-    dt_value = _parse_effective_at(hass, start)
-    if dt_value is not None:
-        return dt_value
-    date_value = dt_util.parse_date(str(start)) if start is not None else None
-    if date_value is None:
-        return None
-    tz = dt_util.get_time_zone(hass.config.time_zone)
-    dt_value = datetime.combine(date_value, datetime.min.time()).replace(tzinfo=tz)
-    return dt_util.as_utc(dt_value)
-
-
-def _event_target(event: dict) -> float | None:
-    if not isinstance(event, dict):
-        return None
-    text = event.get("summary") or event.get("description") or ""
-    match = re.search(r"-?\\d+(?:\\.\\d+)?", str(text))
-    if not match:
-        return None
-    try:
-        return float(match.group(0))
-    except ValueError:
         return None

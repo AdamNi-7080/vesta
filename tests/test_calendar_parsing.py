@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from custom_components.vesta.climate import _event_start, _event_target
+from custom_components.vesta.calendar_handler import _event_start, _event_target
 
 
 class _Config:
