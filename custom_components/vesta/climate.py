@@ -466,9 +466,12 @@ class VestaClimate(ClimateEntity, RestoreEntity):
         if self.hass.state == CoreState.running:
             await self.async_startup()
         else:
+            async def _startup_listener(_event) -> None:
+                await self.async_startup()
+
             self.hass.bus.async_listen_once(
                 EVENT_HOMEASSISTANT_START,
-                lambda _: self.hass.async_create_task(self.async_startup()),
+                _startup_listener,
             )
 
     async def async_startup(self) -> None:
