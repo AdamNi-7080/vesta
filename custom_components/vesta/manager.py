@@ -16,6 +16,65 @@ from homeassistant.helpers.event import async_call_later
 from homeassistant.util import dt as dt_util
 
 
+class _WindowState:
+    window_open = False
+    hold_active = False
+
+    def on_sensor_change(self, window_open: bool) -> "_WindowState":
+        return self
+
+    def on_hold_started(self) -> "_WindowState":
+        return self
+
+    def on_hold_cleared(self) -> "_WindowState":
+        return self
+
+
+class _MonitoringState(_WindowState):
+    def on_sensor_change(self, window_open: bool) -> "_WindowState":
+        return _SENSOR_OPEN if window_open else self
+
+    def on_hold_started(self) -> "_WindowState":
+        return _HOLD
+
+
+class _SensorOpenState(_WindowState):
+    window_open = True
+
+    def on_sensor_change(self, window_open: bool) -> "_WindowState":
+        return self if window_open else _MONITORING
+
+    def on_hold_started(self) -> "_WindowState":
+        return _SENSOR_OPEN_HOLD
+
+
+class _HoldState(_WindowState):
+    hold_active = True
+
+    def on_sensor_change(self, window_open: bool) -> "_WindowState":
+        return _SENSOR_OPEN_HOLD if window_open else self
+
+    def on_hold_cleared(self) -> "_WindowState":
+        return _MONITORING
+
+
+class _SensorOpenHoldState(_WindowState):
+    window_open = True
+    hold_active = True
+
+    def on_sensor_change(self, window_open: bool) -> "_WindowState":
+        return self if window_open else _HOLD
+
+    def on_hold_cleared(self) -> "_WindowState":
+        return _SENSOR_OPEN
+
+
+_MONITORING = _MonitoringState()
+_SENSOR_OPEN = _SensorOpenState()
+_HOLD = _HoldState()
+_SENSOR_OPEN_HOLD = _SensorOpenHoldState()
+
+
 class WindowManager:
     """Track window sensors and inferred window-open events."""
 
@@ -37,7 +96,7 @@ class WindowManager:
         self._on_hold_cleared = on_hold_cleared
         self._on_hold_triggered = on_hold_triggered
 
-        self._window_open = False
+        self._state = _MONITORING
         self._window_hold_until: dt_util.dt.datetime | None = None
         self._window_hold_unsub = None
         self._temp_history: list[tuple[dt_util.dt.datetime, float]] = []
@@ -50,21 +109,21 @@ class WindowManager:
 
     @property
     def window_open(self) -> bool:
-        return self._window_open
+        return self._state.window_open
 
     @property
     def window_hold_until(self) -> dt_util.dt.datetime | None:
         return self._window_hold_until
 
     def is_hold_active(self, now: dt_util.dt.datetime | None = None) -> bool:
-        if self._window_hold_until is None:
+        if not self._state.hold_active or self._window_hold_until is None:
             return False
         if now is None:
             now = dt_util.utcnow()
         return now < self._window_hold_until
 
     def is_forced_off(self, now: dt_util.dt.datetime | None = None) -> bool:
-        return self._window_open or self.is_hold_active(now)
+        return self._state.window_open or self.is_hold_active(now)
 
     def refresh_state(self) -> bool:
         window_open = False
@@ -75,8 +134,8 @@ class WindowManager:
             if state.state == STATE_ON:
                 window_open = True
                 break
-        changed = window_open != self._window_open
-        self._window_open = window_open
+        changed = window_open != self._state.window_open
+        self._state = self._state.on_sensor_change(window_open)
         return changed
 
     def record_temperature(self, temperature: float) -> bool:
@@ -107,12 +166,14 @@ class WindowManager:
 
     def _trigger_window_hold(self) -> None:
         self._window_hold_until = dt_util.utcnow() + self._hold_duration
+        self._state = self._state.on_hold_started()
         if self._window_hold_unsub:
             self._window_hold_unsub()
 
         async def _clear_hold(_now):
             self._window_hold_unsub = None
             self._window_hold_until = None
+            self._state = self._state.on_hold_cleared()
             if self._on_hold_cleared:
                 await self._on_hold_cleared()
 
