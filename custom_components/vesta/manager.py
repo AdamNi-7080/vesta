@@ -261,6 +261,7 @@ class WindowManager(_BaseSensorManager):
                 rate,
             )
             self._trigger_window_hold()
+            self._temp_history = []
             return True
         return False
 
