@@ -45,13 +45,38 @@ CIRCUIT_BREAKER_FAILURES = 3
 CIRCUIT_BREAKER_RESET_SECONDS = 300
 
 
-class BoilerState(Enum):
-    """Explicit boiler states to prevent racing transitions."""
+class _BoilerState:
+    name = "base"
 
-    IDLE = "idle"
-    ANTI_CYCLE = "anti_cycle_cooldown"
-    FIRING = "firing"
-    FAILSAFE = "failsafe"
+    async def handle_demand(
+        self, coordinator: "BoilerCoordinator", now: dt_util.dt.datetime, demand: bool
+    ) -> None:
+        if demand:
+            await coordinator._ensure_boiler_on(now)
+        else:
+            await coordinator._ensure_boiler_off()
+
+
+class _IdleState(_BoilerState):
+    name = "idle"
+
+
+class _AntiCycleState(_BoilerState):
+    name = "anti_cycle_cooldown"
+
+
+class _FiringState(_BoilerState):
+    name = "firing"
+
+
+class _FailsafeState(_BoilerState):
+    name = "failsafe"
+
+
+_IDLE_STATE = _IdleState()
+_ANTI_CYCLE_STATE = _AntiCycleState()
+_FIRING_STATE = _FiringState()
+_FAILSAFE_STATE = _FailsafeState()
 
 
 class CircuitBreakerState(Enum):
@@ -133,7 +158,7 @@ class BoilerCoordinator(DataUpdateCoordinator):
         self._demand: dict[str, bool] = {}
         self._pending_demand: dict[str, bool] = {}
         self._demand_update_unsub = None
-        self._state = BoilerState.IDLE
+        self._state = _IDLE_STATE
         self._cooldown_until: dt_util.dt.datetime | None = None
         self._breaker = CircuitBreaker(
             failure_threshold=CIRCUIT_BREAKER_FAILURES,
@@ -211,10 +236,9 @@ class BoilerCoordinator(DataUpdateCoordinator):
             now = dt_util.utcnow()
             self._update_cooldown_state(now)
 
-            if any(self._demand.values()):
-                await self._ensure_boiler_on(now)
-            else:
-                await self._ensure_boiler_off()
+            await self._state.handle_demand(
+                self, now, any(self._demand.values())
+            )
 
     def _cooldown_remaining(self, now: dt_util.dt.datetime) -> float:
         if self._cooldown_until is None:
@@ -224,23 +248,23 @@ class BoilerCoordinator(DataUpdateCoordinator):
     def _enter_cooldown(self, now: dt_util.dt.datetime) -> None:
         if self._min_cycle <= 0:
             self._cooldown_until = None
-            self._state = BoilerState.IDLE
+            self._state = _IDLE_STATE
             return
         self._cooldown_until = now + timedelta(minutes=self._min_cycle)
-        self._state = BoilerState.ANTI_CYCLE
+        self._state = _ANTI_CYCLE_STATE
 
     def _update_cooldown_state(self, now: dt_util.dt.datetime) -> None:
         if self._cooldown_until is None:
-            if self._state == BoilerState.ANTI_CYCLE:
-                self._state = BoilerState.IDLE
+            if self._state is _ANTI_CYCLE_STATE:
+                self._state = _IDLE_STATE
             return
         if now >= self._cooldown_until:
             self._cooldown_until = None
-            if self._state == BoilerState.ANTI_CYCLE:
-                self._state = BoilerState.IDLE
+            if self._state is _ANTI_CYCLE_STATE:
+                self._state = _IDLE_STATE
             return
-        if self._state not in (BoilerState.FIRING, BoilerState.FAILSAFE):
-            self._state = BoilerState.ANTI_CYCLE
+        if self._state not in (_FIRING_STATE, _FAILSAFE_STATE):
+            self._state = _ANTI_CYCLE_STATE
 
     def _cancel_retry(self) -> None:
         if self._retry_unsub is None:
@@ -274,42 +298,42 @@ class BoilerCoordinator(DataUpdateCoordinator):
         delay = max(remaining, breaker_delay)
         if delay > 0:
             if breaker_delay > 0:
-                self._state = BoilerState.FAILSAFE
-            elif self._state != BoilerState.FAILSAFE:
-                self._state = BoilerState.ANTI_CYCLE
+                self._state = _FAILSAFE_STATE
+            elif self._state is not _FAILSAFE_STATE:
+                self._state = _ANTI_CYCLE_STATE
             self._schedule_retry(delay, replace=True)
             return
-        if self._state == BoilerState.ANTI_CYCLE:
+        if self._state is _ANTI_CYCLE_STATE:
             self._cooldown_until = None
-            self._state = BoilerState.IDLE
+            self._state = _IDLE_STATE
 
         success = await self._turn_boiler_on()
         if success:
             self._cancel_retry()
-            self._state = BoilerState.FIRING
+            self._state = _FIRING_STATE
             return
 
-        self._state = BoilerState.FAILSAFE
+        self._state = _FAILSAFE_STATE
         self._schedule_retry(self._failsafe_delay(now), replace=True)
 
     async def _ensure_boiler_off(self, *, force: bool = False) -> None:
         now = dt_util.utcnow()
         success, was_on = await self._turn_boiler_off()
         if not success:
-            self._state = BoilerState.FAILSAFE
+            self._state = _FAILSAFE_STATE
             self._schedule_retry(self._failsafe_delay(now), replace=True)
             return
 
         self._cancel_retry()
-        if was_on or force or self._state == BoilerState.FIRING:
+        if was_on or force or self._state is _FIRING_STATE:
             self._enter_cooldown(now)
             return
-        if self._state == BoilerState.FAILSAFE:
+        if self._state is _FAILSAFE_STATE:
             if self._cooldown_remaining(now) > 0:
-                self._state = BoilerState.ANTI_CYCLE
+                self._state = _ANTI_CYCLE_STATE
             else:
                 self._cooldown_until = None
-                self._state = BoilerState.IDLE
+                self._state = _IDLE_STATE
             return
         self._update_cooldown_state(now)
 
