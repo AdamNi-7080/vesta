@@ -3,6 +3,15 @@
 ## Unreleased
 - None yet.
 
+## 0.2.0
+- Refactor thermostat math into a domain layer and split calendar/presence/window logic into dedicated modules.
+- Add strategy/command/observer patterns for boiler drivers, valve control, and manager notifications.
+- Introduce boiler state machine, circuit breaker, demand batching, and exponential retry backoff.
+- Replace bucketed learning with linear regression rates (slope/intercept) and expose new attributes.
+- Add vesta_include label support with auto-created labels for include/ignore discovery control.
+- Expand integration logging for tracing demand, state transitions, and safety events.
+- Add comprehensive coordinator/manager/integration test coverage and pytest config defaults.
+
 ## 0.1.14
 - Fix startup boiler retry scheduling when last_off is unknown.
 - Prevent double-unsubscribe on Home Assistant start.
