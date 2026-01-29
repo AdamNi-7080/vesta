@@ -385,6 +385,12 @@ class VestaClimate(ClimateEntity, RestoreEntity):
     async def _handle_window_hold_cleared(self) -> None:
         self._schedule_output_update(immediate=True, immediate_demand=True)
 
+    async def _handle_window_manager_update(self, _window_open: bool) -> None:
+        self._schedule_output_update(immediate=True, immediate_demand=True)
+
+    async def _handle_presence_manager_update(self, _presence_on: bool) -> None:
+        self._schedule_output_update()
+
     def _schedule_output_update(
         self, *, immediate: bool = False, immediate_demand: bool = False
     ) -> None:
@@ -419,8 +425,6 @@ class VestaClimate(ClimateEntity, RestoreEntity):
             + self._battery_sensors
             + self._trvs
             + [MASTER_SWITCH, ECO_NUMBER]
-            + self._window_manager.tracked_entities()
-            + self._presence_manager.tracked_entities()
         )
         if tracked:
             self._unsubs.append(
@@ -428,6 +432,11 @@ class VestaClimate(ClimateEntity, RestoreEntity):
                     self.hass, list(tracked), self._handle_state_change
                 )
             )
+
+        self._window_manager.add_observer(self._handle_window_manager_update)
+        self._presence_manager.add_observer(self._handle_presence_manager_update)
+        self._window_manager.async_start_listeners()
+        self._presence_manager.async_start_listeners()
 
         if self.hass.state == CoreState.running:
             await self.async_startup()
@@ -485,6 +494,7 @@ class VestaClimate(ClimateEntity, RestoreEntity):
             self._output_update_unsub()
             self._output_update_unsub = None
         self._window_manager.async_will_remove_from_hass()
+        self._presence_manager.async_will_remove_from_hass()
         self._cancel_preheat()
         if self._maintenance_task:
             self._maintenance_task.cancel()
@@ -555,16 +565,11 @@ class VestaClimate(ClimateEntity, RestoreEntity):
             await self._update_current_temperature()
         elif entity_id in self._humidity_sensors:
             await self._update_current_humidity()
-        elif self._window_manager.handles(entity_id):
-            self._window_manager.refresh_state()
-            immediate = True
         elif entity_id in self._battery_sensors:
             if await self._refresh_battery_state():
                 immediate = True
             else:
                 return
-        elif self._presence_manager.handles(entity_id):
-            self._presence_manager.refresh_state()
         self._schedule_output_update(
             immediate=immediate, immediate_demand=immediate
         )

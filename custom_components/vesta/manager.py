@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import timedelta
+import inspect
 import math
 from typing import Awaitable, Callable
 
@@ -12,7 +13,10 @@ from homeassistant.const import (
     STATE_UNAVAILABLE,
     STATE_UNKNOWN,
 )
-from homeassistant.helpers.event import async_call_later
+from homeassistant.helpers.event import (
+    async_call_later,
+    async_track_state_change_event,
+)
 from homeassistant.util import dt as dt_util
 
 
@@ -79,6 +83,35 @@ class _BaseSensorManager:
     def __init__(self, hass) -> None:
         self._hass = hass
         self._active = False
+        self._observers: list[Callable[[bool], Awaitable[None] | None]] = []
+        self._state_change_unsub = None
+
+    def add_observer(
+        self, observer: Callable[[bool], Awaitable[None] | None]
+    ) -> None:
+        if observer not in self._observers:
+            self._observers.append(observer)
+
+    def remove_observer(
+        self, observer: Callable[[bool], Awaitable[None] | None]
+    ) -> None:
+        if observer in self._observers:
+            self._observers.remove(observer)
+
+    def async_start_listeners(self) -> None:
+        if self._state_change_unsub is not None:
+            return
+        entities = self.tracked_entities()
+        if not entities:
+            return
+        self._state_change_unsub = async_track_state_change_event(
+            self._hass, entities, self._handle_state_change
+        )
+
+    def async_will_remove_from_hass(self) -> None:
+        if self._state_change_unsub:
+            self._state_change_unsub()
+            self._state_change_unsub = None
 
     def tracked_entities(self) -> list[str]:
         raise NotImplementedError
@@ -103,6 +136,19 @@ class _BaseSensorManager:
         if changed:
             self._on_state_change(current, previous, context)
         return changed
+
+    async def _handle_state_change(self, event) -> None:
+        self.refresh_state()
+        await self._notify_observers()
+
+    async def _notify_observers(self) -> None:
+        if not self._observers:
+            return
+        active = self._get_active()
+        for observer in list(self._observers):
+            result = observer(active)
+            if inspect.isawaitable(result):
+                await result
 
     def _pre_refresh(self, previous: bool):
         return None
@@ -201,6 +247,7 @@ class WindowManager(_BaseSensorManager):
         return False
 
     def async_will_remove_from_hass(self) -> None:
+        super().async_will_remove_from_hass()
         if self._window_hold_unsub:
             self._window_hold_unsub()
             self._window_hold_unsub = None
