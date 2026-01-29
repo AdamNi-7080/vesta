@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 import sys
 import types
 
+import pytest
 
 def _install_fake_homeassistant() -> None:
     try:
@@ -126,6 +127,15 @@ from custom_components.vesta import coordinator as coordinator_module
 from custom_components.vesta.commands import CommandResult
 
 
+@pytest.fixture(autouse=True)
+def _stub_async_call_later(monkeypatch):
+    monkeypatch.setattr(
+        coordinator_module,
+        "async_call_later",
+        lambda hass, delay, action: (lambda: None),
+    )
+
+
 class FakeState:
     def __init__(self, state, attributes=None):
         self.state = state
@@ -177,9 +187,9 @@ def _make_coordinator(hass, *, boiler_entity="switch.boiler", min_cycle=1):
     return BoilerCoordinator(hass, entry)
 
 
-def test_coordinator_fires_on_demand():
+def test_coordinator_fires_on_demand(monkeypatch):
     now = datetime(2026, 1, 1, tzinfo=timezone.utc)
-    coordinator_module.dt_util.utcnow = lambda: now
+    monkeypatch.setattr(coordinator_module.dt_util, "utcnow", lambda: now)
 
     states = FakeStates(
         {
@@ -196,9 +206,9 @@ def test_coordinator_fires_on_demand():
     assert coordinator._state.name == "firing"
 
 
-def test_coordinator_enters_anti_cycle_on_cancel():
+def test_coordinator_enters_anti_cycle_on_cancel(monkeypatch):
     now = datetime(2026, 1, 1, tzinfo=timezone.utc)
-    coordinator_module.dt_util.utcnow = lambda: now
+    monkeypatch.setattr(coordinator_module.dt_util, "utcnow", lambda: now)
 
     states = FakeStates(
         {
@@ -218,10 +228,12 @@ def test_coordinator_enters_anti_cycle_on_cancel():
     assert coordinator._cooldown_until > now
 
 
-def test_coordinator_holds_demand_during_anti_cycle():
+def test_coordinator_holds_demand_during_anti_cycle(monkeypatch):
     now = datetime(2026, 1, 1, tzinfo=timezone.utc)
     time_controller = {"now": now}
-    coordinator_module.dt_util.utcnow = lambda: time_controller["now"]
+    monkeypatch.setattr(
+        coordinator_module.dt_util, "utcnow", lambda: time_controller["now"]
+    )
 
     states = FakeStates(
         {
@@ -243,15 +255,17 @@ def test_coordinator_holds_demand_during_anti_cycle():
     assert len(services.calls) == calls_before
 
     time_controller["now"] = now + timedelta(minutes=1, seconds=1)
-    asyncio.run(coordinator.async_update_demand("zone1", True, immediate=True))
+    asyncio.run(coordinator.async_recalculate())
     assert coordinator._state.name == "firing"
     assert len(services.calls) == calls_before + 1
 
 
-def test_circuit_breaker_blocks_after_failures():
+def test_circuit_breaker_blocks_after_failures(monkeypatch):
     now = datetime(2026, 1, 1, tzinfo=timezone.utc)
     time_controller = {"now": now}
-    coordinator_module.dt_util.utcnow = lambda: time_controller["now"]
+    monkeypatch.setattr(
+        coordinator_module.dt_util, "utcnow", lambda: time_controller["now"]
+    )
 
     states = FakeStates(
         {
@@ -283,9 +297,9 @@ def test_circuit_breaker_blocks_after_failures():
     assert len(calls) == 4
 
 
-def test_master_switch_unavailable_defaults_to_safety_on():
+def test_master_switch_unavailable_defaults_to_safety_on(monkeypatch):
     now = datetime(2026, 1, 1, tzinfo=timezone.utc)
-    coordinator_module.dt_util.utcnow = lambda: now
+    monkeypatch.setattr(coordinator_module.dt_util, "utcnow", lambda: now)
 
     states = FakeStates(
         {

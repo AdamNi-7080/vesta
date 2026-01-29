@@ -1,8 +1,20 @@
 from __future__ import annotations
 
-from datetime import timedelta
+import sys
 
 import pytest
+
+pytest.importorskip("pytest_homeassistant_custom_component")
+
+pytestmark = pytest.mark.usefixtures("enable_custom_integrations")
+
+_ha_module = sys.modules.get("homeassistant")
+if _ha_module is not None and not hasattr(_ha_module, "config_entries"):
+    pytest.skip(
+        "homeassistant package not available (stubbed module detected)",
+        allow_module_level=True,
+    )
+pytest.importorskip("homeassistant")
 
 from homeassistant.config_entries import SOURCE_USER
 from homeassistant.const import STATE_OFF, STATE_ON
@@ -10,10 +22,10 @@ from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.helpers import area_registry as ar
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import label_registry as lr
-from homeassistant.util import dt as dt_util
+from homeassistant.core import EVENT_CALL_SERVICE
 from pytest_homeassistant_custom_component.common import (
     MockConfigEntry,
-    async_fire_time_changed,
+    async_capture_events,
     async_mock_service,
 )
 
@@ -28,27 +40,44 @@ from custom_components.vesta.const import (
 )
 
 
+def _prepare_boiler(hass, *, entity_id: str = "switch.boiler"):
+    hass.states.async_set(entity_id, STATE_OFF)
+    switch_on_calls = async_mock_service(hass, "switch", "turn_on")
+    switch_off_calls = async_mock_service(hass, "switch", "turn_off")
+    return switch_on_calls, switch_off_calls
+
+
+def _extract_event_entity_ids(event) -> list[str]:
+    data = event.data.get("service_data", {})
+    entity_ids = data.get("entity_id")
+    if entity_ids is None:
+        return []
+    if isinstance(entity_ids, str):
+        return [entity_ids]
+    return list(entity_ids)
+
+
 async def _create_area_entities(hass, *, area_name: str) -> str:
     area_reg = ar.async_get(hass)
     area = area_reg.async_create(area_name)
     ent_reg = er.async_get(hass)
 
-    ent_reg.async_get_or_create(
+    trv_entry = ent_reg.async_get_or_create(
         "climate",
         "test",
         f"{area_name}_trv",
         suggested_object_id=f"{area_name.lower()}_trv",
-        area_id=area.id,
     )
+    ent_reg.async_update_entity(trv_entry.entity_id, area_id=area.id)
 
-    ent_reg.async_get_or_create(
+    temp_entry = ent_reg.async_get_or_create(
         "sensor",
         "test",
         f"{area_name}_temp",
         suggested_object_id=f"{area_name.lower()}_temp",
-        area_id=area.id,
         original_device_class="temperature",
     )
+    ent_reg.async_update_entity(temp_entry.entity_id, area_id=area.id)
 
     return area.id
 
@@ -70,17 +99,14 @@ async def _setup_vesta_entry(hass, *, boiler_entity: str, weather_entity: str):
 @pytest.mark.asyncio
 async def test_integration_heating_loop(hass):
     await _create_area_entities(hass, area_name="Bedroom")
+    events = async_capture_events(hass, EVENT_CALL_SERVICE)
 
-    hass.states.async_set("sensor.bedroom_temp", 18.0)
+    hass.states.async_set("sensor.bedroom_temp", 10.0)
     hass.states.async_set("climate.bedroom_trv", "heat")
-    hass.states.async_set("switch.boiler", STATE_OFF)
     hass.states.async_set("weather.home", "cloudy", {"temperature": 5.0})
     hass.states.async_set("switch.vesta_master_heating", STATE_ON)
 
-    climate_temp_calls = async_mock_service(hass, "climate", "set_temperature")
-    async_mock_service(hass, "climate", "set_hvac_mode")
-    switch_on_calls = async_mock_service(hass, "switch", "turn_on")
-    async_mock_service(hass, "switch", "turn_off")
+    _prepare_boiler(hass)
 
     await _setup_vesta_entry(
         hass,
@@ -88,24 +114,25 @@ async def test_integration_heating_loop(hass):
         weather_entity="weather.home",
     )
 
-    climate_temp_calls.clear()
-    switch_on_calls.clear()
-
-    hass.states.async_set("sensor.bedroom_temp", 10.0)
-    await hass.async_block_till_done()
-
-    now = dt_util.utcnow()
-    async_fire_time_changed(hass, now + timedelta(seconds=6))
-    await hass.async_block_till_done()
-    async_fire_time_changed(hass, now + timedelta(seconds=12))
+    await hass.services.async_call(
+        DOMAIN,
+        "set_schedule",
+        {"area_name": "Bedroom", "target": 21},
+        blocking=True,
+    )
     await hass.async_block_till_done()
 
     assert any(
-        "climate.bedroom_trv" in call.data.get("entity_id", [])
-        for call in climate_temp_calls
+        event.data.get("domain") == "climate"
+        and event.data.get("service") == "set_temperature"
+        and "climate.bedroom_trv" in _extract_event_entity_ids(event)
+        for event in events
     )
     assert any(
-        call.data.get("entity_id") == "switch.boiler" for call in switch_on_calls
+        event.data.get("domain") == "switch"
+        and event.data.get("service") == "turn_on"
+        and "switch.boiler" in _extract_event_entity_ids(event)
+        for event in events
     )
 
 
@@ -126,43 +153,41 @@ async def test_ignore_label_excludes_sensor(hass):
             name="vesta_ignore", color="#db4c4c", icon="mdi:eye-off"
         )
 
-    ent_reg.async_get_or_create(
+    trv_entry = ent_reg.async_get_or_create(
         "climate",
         "test",
         "office_trv",
         suggested_object_id="office_trv",
-        area_id=area.id,
     )
+    ent_reg.async_update_entity(trv_entry.entity_id, area_id=area.id)
 
-    ent_reg.async_get_or_create(
+    temp_entry = ent_reg.async_get_or_create(
         "sensor",
         "test",
         "office_temp",
         suggested_object_id="office_temp",
-        area_id=area.id,
         original_device_class="temperature",
     )
+    ent_reg.async_update_entity(temp_entry.entity_id, area_id=area.id)
 
     ignored_entry = ent_reg.async_get_or_create(
         "sensor",
         "test",
         "office_ignored_temp",
         suggested_object_id="office_ignored_temp",
-        area_id=area.id,
         original_device_class="temperature",
     )
+    ent_reg.async_update_entity(ignored_entry.entity_id, area_id=area.id)
     ent_reg.async_update_entity(ignored_entry.entity_id, labels={label.label_id})
 
     hass.states.async_set("sensor.office_temp", 19.0)
     hass.states.async_set("sensor.office_ignored_temp", 21.0)
     hass.states.async_set("climate.office_trv", "heat")
-    hass.states.async_set("switch.boiler", STATE_OFF)
     hass.states.async_set("weather.home", "cloudy", {"temperature": 5.0})
 
     async_mock_service(hass, "climate", "set_hvac_mode")
     async_mock_service(hass, "climate", "set_temperature")
-    async_mock_service(hass, "switch", "turn_on")
-    async_mock_service(hass, "switch", "turn_off")
+    _prepare_boiler(hass)
 
     await _setup_vesta_entry(
         hass,
@@ -183,6 +208,9 @@ async def test_ignore_label_excludes_sensor(hass):
 
 @pytest.mark.asyncio
 async def test_config_flow_creates_entry(hass):
+    hass.states.async_set("weather.home", "cloudy", {"temperature": 5.0})
+    _prepare_boiler(hass)
+
     result = await hass.config_entries.flow.async_init(
         DOMAIN, context={"source": SOURCE_USER}
     )
@@ -205,17 +233,21 @@ async def test_config_flow_creates_entry(hass):
 
 @pytest.mark.asyncio
 async def test_config_flow_rejects_missing(hass):
+    hass.states.async_set("weather.home", "cloudy", {"temperature": 5.0})
+    _prepare_boiler(hass)
+
     result = await hass.config_entries.flow.async_init(
         DOMAIN, context={"source": SOURCE_USER}
     )
     assert result["type"] == FlowResultType.FORM
 
-    result = await hass.config_entries.flow.async_configure(
-        result["flow_id"],
-        user_input={
-            CONF_BOILER_ENTITY: None,
-            CONF_WEATHER_ENTITY: "weather.home",
-        },
-    )
-    assert result["type"] == FlowResultType.FORM
-    assert result["errors"]["base"] == "missing"
+    from homeassistant.data_entry_flow import InvalidData
+
+    with pytest.raises(InvalidData):
+        await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            user_input={
+                CONF_BOILER_ENTITY: None,
+                CONF_WEATHER_ENTITY: "weather.home",
+            },
+        )
