@@ -728,7 +728,7 @@ class VestaClimate(ClimateEntity, RestoreEntity):
 
     def _effective_target(self) -> float | None:
         mode = self._select_target_mode()
-        return mode.target(self._target_context())
+        return mode.calculate_final_target(self._target_context())
 
     async def _schedule_future_target(
         self, target: float, effective_at: dt_util.dt.datetime

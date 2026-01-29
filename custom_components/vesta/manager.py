@@ -75,7 +75,52 @@ _HOLD = _HoldState()
 _SENSOR_OPEN_HOLD = _SensorOpenHoldState()
 
 
-class WindowManager:
+class _BaseSensorManager:
+    def __init__(self, hass) -> None:
+        self._hass = hass
+        self._active = False
+
+    def tracked_entities(self) -> list[str]:
+        raise NotImplementedError
+
+    def _iter_state_entities(self) -> list[str]:
+        return self.tracked_entities()
+
+    def refresh_state(self) -> bool:
+        previous = self._get_active()
+        context = self._pre_refresh(previous)
+        active = False
+        for entity_id in self._iter_state_entities():
+            state = self._hass.states.get(entity_id)
+            if state is None:
+                continue
+            if self._is_active_state(entity_id, state, context):
+                active = True
+                break
+        self._set_active(active, context)
+        current = self._get_active()
+        changed = current != previous
+        if changed:
+            self._on_state_change(current, previous, context)
+        return changed
+
+    def _pre_refresh(self, previous: bool):
+        return None
+
+    def _is_active_state(self, entity_id: str, state, context) -> bool:
+        raise NotImplementedError
+
+    def _set_active(self, active: bool, context) -> None:
+        self._active = active
+
+    def _get_active(self) -> bool:
+        return self._active
+
+    def _on_state_change(self, current: bool, previous: bool, context) -> None:
+        return
+
+
+class WindowManager(_BaseSensorManager):
     """Track window sensors and inferred window-open events."""
 
     def __init__(
@@ -88,7 +133,7 @@ class WindowManager:
         on_hold_cleared: Callable[[], Awaitable[None]] | None = None,
         on_hold_triggered: Callable[[], None] | None = None,
     ) -> None:
-        self._hass = hass
+        super().__init__(hass)
         self._window_sensors = list(window_sensors)
         self._sensor_set = set(self._window_sensors)
         self._window_threshold = window_threshold
@@ -125,18 +170,14 @@ class WindowManager:
     def is_forced_off(self, now: dt_util.dt.datetime | None = None) -> bool:
         return self._state.window_open or self.is_hold_active(now)
 
-    def refresh_state(self) -> bool:
-        window_open = False
-        for entity_id in self._window_sensors:
-            state = self._hass.states.get(entity_id)
-            if state is None:
-                continue
-            if state.state == STATE_ON:
-                window_open = True
-                break
-        changed = window_open != self._state.window_open
-        self._state = self._state.on_sensor_change(window_open)
-        return changed
+    def _is_active_state(self, entity_id: str, state, context) -> bool:
+        return state.state == STATE_ON
+
+    def _set_active(self, active: bool, context) -> None:
+        self._state = self._state.on_sensor_change(active)
+
+    def _get_active(self) -> bool:
+        return self._state.window_open
 
     def record_temperature(self, temperature: float) -> bool:
         now = dt_util.utcnow()
@@ -184,7 +225,7 @@ class WindowManager:
             self._on_hold_triggered()
 
 
-class PresenceManager:
+class PresenceManager(_BaseSensorManager):
     """Track room presence using zone, guest, and sensor inputs."""
 
     def __init__(
@@ -199,7 +240,7 @@ class PresenceManager:
         guest_entity_id: str,
         home_entity_id: str,
     ) -> None:
-        self._hass = hass
+        super().__init__(hass)
         self._area_name = area_name
         self._slug = slug
         self._presence_sensors = list(presence_sensors)
@@ -236,39 +277,38 @@ class PresenceManager:
         state = self._hass.states.get(self._guest_entity_id)
         return state is not None and state.state == STATE_ON
 
-    def refresh_state(self) -> bool:
-        previous_presence = self._presence_on
-        guest_mode = self.is_guest_mode()
-        zone_home = self.is_home() or guest_mode
-        self._presence_on = False
-        if not zone_home:
-            return self._presence_on != previous_presence
-        if self._distance_sensors:
-            hysteresis = 0.5 if previous_presence else 0.0
-            for entity_id in self._distance_sensors:
-                value = _state_to_float(self._hass.states.get(entity_id))
-                if value is None or not math.isfinite(value):
-                    continue
-                if value < self._bermuda_threshold + hysteresis:
-                    self._presence_on = True
-                    return self._presence_on != previous_presence
+    def _iter_state_entities(self) -> list[str]:
+        return self._distance_sensors + self._presence_sensors
 
-        for entity_id in self._presence_sensors:
-            state = self._hass.states.get(entity_id)
-            if state is None:
-                continue
-            if entity_id.startswith("binary_sensor."):
-                if state.state in (STATE_ON, STATE_HOME):
-                    self._presence_on = True
-                    return self._presence_on != previous_presence
-                continue
-            if state.state in (STATE_UNKNOWN, STATE_UNAVAILABLE):
-                continue
-            state_value = str(state.state).casefold()
-            if state_value in (self._area_name.casefold(), self._slug.casefold()):
-                self._presence_on = True
-                return self._presence_on != previous_presence
-        return self._presence_on != previous_presence
+    def _pre_refresh(self, previous: bool):
+        guest_mode = self.is_guest_mode()
+        return {
+            "previous": previous,
+            "zone_home": self.is_home() or guest_mode,
+        }
+
+    def _is_active_state(self, entity_id: str, state, context) -> bool:
+        if not context["zone_home"]:
+            return False
+        if entity_id in self._distance_sensors:
+            value = _state_to_float(state)
+            if value is None or not math.isfinite(value):
+                return False
+            hysteresis = 0.5 if context["previous"] else 0.0
+            return value < self._bermuda_threshold + hysteresis
+
+        if entity_id.startswith("binary_sensor."):
+            return state.state in (STATE_ON, STATE_HOME)
+        if state.state in (STATE_UNKNOWN, STATE_UNAVAILABLE):
+            return False
+        state_value = str(state.state).casefold()
+        return state_value in (self._area_name.casefold(), self._slug.casefold())
+
+    def _set_active(self, active: bool, context) -> None:
+        self._presence_on = active
+
+    def _get_active(self) -> bool:
+        return self._presence_on
 
 
 def _state_to_float(state) -> float | None:

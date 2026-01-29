@@ -17,7 +17,7 @@ def test_scheduled_fallback_with_presence_boost():
         has_presence_sensors=True,
         presence_on=True,
     )
-    assert ScheduledTargetMode().target(context) == 20.0
+    assert ScheduledTargetMode().calculate_final_target(context) == 20.0
 
 
 def test_eco_mode_uses_eco_temp():
@@ -29,7 +29,7 @@ def test_eco_mode_uses_eco_temp():
         has_presence_sensors=False,
         presence_on=False,
     )
-    assert EcoTargetMode().target(context) == 16.0
+    assert EcoTargetMode().calculate_final_target(context) == 16.0
 
 
 def test_override_modes_return_target():
@@ -43,8 +43,8 @@ def test_override_modes_return_target():
     )
     boost = BoostTargetMode(23.0)
     save = SaveTargetMode(18.5)
-    assert boost.target(context) == 23.0
-    assert save.target(context) == 18.5
+    assert boost.calculate_final_target(context) == 23.0
+    assert save.calculate_final_target(context) == 18.5
     assert boost.is_override()
     assert save.is_override()
 
@@ -58,4 +58,17 @@ def test_failsafe_mode_returns_target():
         has_presence_sensors=False,
         presence_on=False,
     )
-    assert FailsafeTargetMode(15.0).target(context) == 15.0
+    assert FailsafeTargetMode(15.0).calculate_final_target(context) == 15.0
+
+
+def test_target_clamps_to_limits():
+    context = TargetContext(
+        schedule_target=21.0,
+        off_temp=12.0,
+        comfort_temp=20.0,
+        eco_temp=16.0,
+        has_presence_sensors=False,
+        presence_on=False,
+    )
+    assert BoostTargetMode(100.0).calculate_final_target(context) == 30.0
+    assert SaveTargetMode(-5.0).calculate_final_target(context) == 5.0

@@ -12,6 +12,59 @@ from .const import STORAGE_KEY, STORAGE_VERSION
 
 DEFAULT_RATE = 1.5
 DEFAULT_COOLING_RATE = 0.5
+MIN_CYCLE_HOURS = 0.25
+SMOOTHING_WEIGHT = 0.3
+
+
+class _ThermalLearningBase:
+    """Template for cycle learning logic."""
+
+    def __init__(
+        self,
+        parent: "VestaLearning",
+        *,
+        rates: dict[str, dict[str, float]],
+        active_cycles: dict[str, _Cycle],
+        default_rate: float,
+    ) -> None:
+        self._parent = parent
+        self._rates = rates
+        self._active_cycles = active_cycles
+        self._default_rate = default_rate
+
+    async def end_cycle(self, zone_id: str, end_temp: float) -> None:
+        cycle = self._active_cycles.pop(zone_id, None)
+        if cycle is None:
+            return
+        duration = dt_util.utcnow() - cycle.start_time
+        hours = duration.total_seconds() / 3600
+        if hours <= MIN_CYCLE_HOURS:
+            return
+        delta = self._calculate_delta(cycle.start_temp, end_temp)
+        if delta <= 0:
+            return
+        observed_rate = delta / hours
+        bucket = self._parent._bucket(cycle.outdoor_temp, cycle.is_sunny)
+        zone = self._rates.setdefault(zone_id, {})
+        old_rate = zone.get(bucket, self._default_rate)
+        new_rate = (old_rate * (1 - SMOOTHING_WEIGHT)) + (
+            observed_rate * SMOOTHING_WEIGHT
+        )
+        zone[bucket] = round(new_rate, 3)
+        await self._parent.async_save()
+
+    def _calculate_delta(self, start_temp: float, end_temp: float) -> float:
+        raise NotImplementedError
+
+
+class _HeatingLearning(_ThermalLearningBase):
+    def _calculate_delta(self, start_temp: float, end_temp: float) -> float:
+        return end_temp - start_temp
+
+
+class _CoolingLearning(_ThermalLearningBase):
+    def _calculate_delta(self, start_temp: float, end_temp: float) -> float:
+        return start_temp - end_temp
 
 
 @dataclass
@@ -31,6 +84,18 @@ class VestaLearning:
         self._cooling_rates: dict[str, dict[str, float]] = {}
         self._active_heating: dict[str, _Cycle] = {}
         self._active_cooling: dict[str, _Cycle] = {}
+        self._heating_learning = _HeatingLearning(
+            self,
+            rates=self._heating_rates,
+            active_cycles=self._active_heating,
+            default_rate=DEFAULT_RATE,
+        )
+        self._cooling_learning = _CoolingLearning(
+            self,
+            rates=self._cooling_rates,
+            active_cycles=self._active_cooling,
+            default_rate=DEFAULT_COOLING_RATE,
+        )
 
     async def async_load(self) -> None:
         loaded = await self._store.async_load()
@@ -104,23 +169,7 @@ class VestaLearning:
         )
 
     async def async_end_cycle(self, zone_id: str, end_temp: float) -> None:
-        cycle = self._active_heating.pop(zone_id, None)
-        if cycle is None:
-            return
-        duration = dt_util.utcnow() - cycle.start_time
-        hours = duration.total_seconds() / 3600
-        if hours <= 0.25:
-            return
-        delta = end_temp - cycle.start_temp
-        if delta <= 0:
-            return
-        observed_rate = delta / hours
-        bucket = self._bucket(cycle.outdoor_temp, cycle.is_sunny)
-        zone = self._heating_rates.setdefault(zone_id, {})
-        old_rate = zone.get(bucket, DEFAULT_RATE)
-        new_rate = (old_rate * 0.7) + (observed_rate * 0.3)
-        zone[bucket] = round(new_rate, 3)
-        await self.async_save()
+        await self._heating_learning.end_cycle(zone_id, end_temp)
 
     async def async_start_cooling_cycle(
         self,
@@ -137,20 +186,4 @@ class VestaLearning:
         )
 
     async def async_end_cooling_cycle(self, zone_id: str, end_temp: float) -> None:
-        cycle = self._active_cooling.pop(zone_id, None)
-        if cycle is None:
-            return
-        duration = dt_util.utcnow() - cycle.start_time
-        hours = duration.total_seconds() / 3600
-        if hours <= 0.25:
-            return
-        delta = cycle.start_temp - end_temp
-        if delta <= 0:
-            return
-        observed_rate = delta / hours
-        bucket = self._bucket(cycle.outdoor_temp, cycle.is_sunny)
-        zone = self._cooling_rates.setdefault(zone_id, {})
-        old_rate = zone.get(bucket, DEFAULT_COOLING_RATE)
-        new_rate = (old_rate * 0.7) + (observed_rate * 0.3)
-        zone[bucket] = round(new_rate, 3)
-        await self.async_save()
+        await self._cooling_learning.end_cycle(zone_id, end_temp)

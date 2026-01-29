@@ -35,10 +35,18 @@ class _BaseVestaSwitch(SwitchEntity, RestoreEntity):
     async def async_turn_on(self, **kwargs) -> None:
         self._attr_is_on = True
         self.async_write_ha_state()
+        await self._on_after_turn_on()
 
     async def async_turn_off(self, **kwargs) -> None:
         self._attr_is_on = False
         self.async_write_ha_state()
+        await self._on_after_turn_off()
+
+    async def _on_after_turn_on(self) -> None:
+        return
+
+    async def _on_after_turn_off(self) -> None:
+        return
 
 
 class VestaGuestModeSwitch(_BaseVestaSwitch):
@@ -55,10 +63,8 @@ class VestaMasterHeatingSwitch(_BaseVestaSwitch):
         super().__init__("Vesta Master Heating", "vesta_master_heating", True)
         self._coordinator = coordinator
 
-    async def async_turn_on(self, **kwargs) -> None:
-        await super().async_turn_on(**kwargs)
+    async def _on_after_turn_on(self) -> None:
         await self._coordinator.async_recalculate()
 
-    async def async_turn_off(self, **kwargs) -> None:
-        await super().async_turn_off(**kwargs)
+    async def _on_after_turn_off(self) -> None:
         await self._coordinator.async_recalculate()
