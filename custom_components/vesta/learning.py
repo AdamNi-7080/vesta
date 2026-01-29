@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 import inspect
+import math
 from typing import Awaitable, Callable
 
 from homeassistant.helpers.storage import Store
@@ -15,7 +16,10 @@ from .const import STORAGE_KEY, STORAGE_VERSION
 DEFAULT_RATE = 1.5
 DEFAULT_COOLING_RATE = 0.5
 MIN_CYCLE_HOURS = 0.25
-SMOOTHING_WEIGHT = 0.3
+MIN_HISTORY_POINTS = 5
+MAX_HISTORY_POINTS = 50
+RATE_MIN = 0.1
+RATE_MAX = 5.0
 
 
 class _ThermalLearningBase:
@@ -25,15 +29,13 @@ class _ThermalLearningBase:
         self,
         parent: "VestaLearning",
         *,
-        rates: dict[str, dict[str, float]],
+        history: dict[str, list[dict[str, float]]],
         active_cycles: dict[str, _Cycle],
-        default_rate: float,
         kind: str,
     ) -> None:
         self._parent = parent
-        self._rates = rates
+        self._history = history
         self._active_cycles = active_cycles
-        self._default_rate = default_rate
         self._kind = kind
 
     async def end_cycle(self, zone_id: str, end_temp: float) -> None:
@@ -47,21 +49,24 @@ class _ThermalLearningBase:
         delta = self._calculate_delta(cycle.start_temp, end_temp)
         if delta <= 0:
             return
+        if cycle.outdoor_temp is None or not math.isfinite(cycle.outdoor_temp):
+            return
         observed_rate = delta / hours
-        bucket = self._parent._bucket(cycle.outdoor_temp, cycle.is_sunny)
-        zone = self._rates.setdefault(zone_id, {})
-        old_rate = zone.get(bucket, self._default_rate)
-        new_rate = (old_rate * (1 - SMOOTHING_WEIGHT)) + (
-            observed_rate * SMOOTHING_WEIGHT
+        history = self._history.setdefault(zone_id, [])
+        history.append(
+            {
+                "outdoor": float(cycle.outdoor_temp),
+                "rate": round(observed_rate, 3),
+            }
         )
-        zone[bucket] = round(new_rate, 3)
+        self._parent._prune_history(history)
         await self._parent.async_save()
         await self._parent._notify_rate_update(
             LearningUpdate(
                 zone_id=zone_id,
                 kind=self._kind,
-                bucket=bucket,
-                rate=zone[bucket],
+                outdoor=float(cycle.outdoor_temp),
+                rate=round(observed_rate, 3),
             )
         )
 
@@ -91,32 +96,30 @@ class _Cycle:
 class LearningUpdate:
     zone_id: str
     kind: str
-    bucket: str
+    outdoor: float
     rate: float
 
 
 class VestaLearning:
-    """Learning manager for heating and cooling rate per zone and weather bucket."""
+    """Learning manager for heating and cooling rates per zone."""
 
     def __init__(self, hass):
         self._store = Store(hass, STORAGE_VERSION, STORAGE_KEY)
-        self._heating_rates: dict[str, dict[str, float]] = {}
-        self._cooling_rates: dict[str, dict[str, float]] = {}
+        self._heating_history: dict[str, list[dict[str, float]]] = {}
+        self._cooling_history: dict[str, list[dict[str, float]]] = {}
         self._active_heating: dict[str, _Cycle] = {}
         self._active_cooling: dict[str, _Cycle] = {}
         self._observers: list[Callable[[LearningUpdate], Awaitable[None] | None]] = []
         self._heating_learning = _HeatingLearning(
             self,
-            rates=self._heating_rates,
+            history=self._heating_history,
             active_cycles=self._active_heating,
-            default_rate=DEFAULT_RATE,
             kind="heating",
         )
         self._cooling_learning = _CoolingLearning(
             self,
-            rates=self._cooling_rates,
+            history=self._cooling_history,
             active_cycles=self._active_cooling,
-            default_rate=DEFAULT_COOLING_RATE,
             kind="cooling",
         )
 
@@ -143,59 +146,107 @@ class VestaLearning:
     async def async_load(self) -> None:
         loaded = await self._store.async_load()
         if isinstance(loaded, dict):
-            if "heating_rates" in loaded or "cooling_rates" in loaded:
-                self._heating_rates = loaded.get("heating_rates", {}) or {}
-                self._cooling_rates = loaded.get("cooling_rates", {}) or {}
+            if (
+                "zone_heating_history" in loaded
+                or "zone_cooling_history" in loaded
+            ):
+                self._heating_history = (
+                    loaded.get("zone_heating_history", {}) or {}
+                )
+                self._cooling_history = (
+                    loaded.get("zone_cooling_history", {}) or {}
+                )
+                for history in self._heating_history.values():
+                    self._prune_history(history)
+                for history in self._cooling_history.values():
+                    self._prune_history(history)
             else:
-                self._heating_rates = loaded
-                self._cooling_rates = {}
+                self._heating_history = {}
+                self._cooling_history = {}
 
     async def async_save(self) -> None:
         await self._store.async_save(
             {
-                "heating_rates": self._heating_rates,
-                "cooling_rates": self._cooling_rates,
+                "zone_heating_history": self._heating_history,
+                "zone_cooling_history": self._cooling_history,
             }
         )
 
-    def _bucket(self, outdoor_temp: float | None, is_sunny: bool = False) -> str:
-        if outdoor_temp is None:
-            bucket = "cool"
-        elif outdoor_temp < 0:
-            bucket = "cold"
-        elif outdoor_temp < 10:
-            bucket = "cool"
-        elif outdoor_temp < 15:
-            bucket = "mild"
-        else:
-            bucket = "warm"
-        if is_sunny:
-            return f"{bucket}_sunny"
-        return bucket
+    def _prune_history(self, history: list[dict[str, float]]) -> None:
+        while len(history) > MAX_HISTORY_POINTS:
+            history.pop(0)
 
     def get_rate(
         self, zone_id: str, outdoor_temp: float | None, is_sunny: bool = False
     ) -> float:
-        bucket = self._bucket(outdoor_temp, is_sunny)
-        fallback_bucket = self._bucket(outdoor_temp, False)
-        zone = self._heating_rates.get(zone_id, {})
-        if bucket in zone:
-            return zone[bucket]
-        if is_sunny and fallback_bucket in zone:
-            return zone[fallback_bucket]
+        if outdoor_temp is None or not math.isfinite(outdoor_temp):
+            return DEFAULT_RATE
+        history = self._heating_history.get(zone_id, [])
+        rate = self._predict_rate(history, outdoor_temp)
+        if rate is not None:
+            return rate
         return DEFAULT_RATE
 
     def get_cooling_rate(
         self, zone_id: str, outdoor_temp: float | None, is_sunny: bool = False
     ) -> float:
-        bucket = self._bucket(outdoor_temp, is_sunny)
-        fallback_bucket = self._bucket(outdoor_temp, False)
-        zone = self._cooling_rates.get(zone_id, {})
-        if bucket in zone:
-            return zone[bucket]
-        if is_sunny and fallback_bucket in zone:
-            return zone[fallback_bucket]
+        if outdoor_temp is None or not math.isfinite(outdoor_temp):
+            return DEFAULT_COOLING_RATE
+        history = self._cooling_history.get(zone_id, [])
+        rate = self._predict_rate(history, outdoor_temp)
+        if rate is not None:
+            return rate
         return DEFAULT_COOLING_RATE
+
+    def _predict_rate(
+        self, history: list[dict[str, float]], outdoor_temp: float
+    ) -> float | None:
+        points = self._history_points(history)
+        if len(points) < MIN_HISTORY_POINTS:
+            return None
+        slope, intercept = self._linear_regression(points)
+        if slope is None or intercept is None:
+            return None
+        predicted = (slope * outdoor_temp) + intercept
+        return max(RATE_MIN, min(RATE_MAX, predicted))
+
+    def _history_points(
+        self, history: list[dict[str, float]]
+    ) -> list[tuple[float, float]]:
+        points: list[tuple[float, float]] = []
+        for point in history:
+            if not isinstance(point, dict):
+                continue
+            outdoor = point.get("outdoor")
+            rate = point.get("rate")
+            if outdoor is None or rate is None:
+                continue
+            try:
+                outdoor_value = float(outdoor)
+                rate_value = float(rate)
+            except (TypeError, ValueError):
+                continue
+            if not math.isfinite(outdoor_value) or not math.isfinite(rate_value):
+                continue
+            points.append((outdoor_value, rate_value))
+        return points
+
+    def _linear_regression(
+        self, points: list[tuple[float, float]]
+    ) -> tuple[float | None, float | None]:
+        n = len(points)
+        if n == 0:
+            return None, None
+        sum_x = sum(point[0] for point in points)
+        sum_y = sum(point[1] for point in points)
+        sum_xy = sum(point[0] * point[1] for point in points)
+        sum_x2 = sum(point[0] ** 2 for point in points)
+        denominator = (n * sum_x2) - (sum_x**2)
+        if denominator == 0:
+            return None, None
+        slope = ((n * sum_xy) - (sum_x * sum_y)) / denominator
+        intercept = (sum_y - (slope * sum_x)) / n
+        return slope, intercept
 
     async def async_start_cycle(
         self,
