@@ -995,6 +995,33 @@ class VestaClimate(ClimateEntity, RestoreEntity):
             valid.append(entity_id)
         return valid
 
+    def _trv_needs_update(
+        self, entity_id: str, hvac_mode: HVACMode, temperature: float
+    ) -> bool:
+        state = self.hass.states.get(entity_id)
+        if state is None or state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
+            return True
+
+        current_mode = state.state
+        current_target = state.attributes.get(ATTR_TEMPERATURE)
+        try:
+            current_target = float(current_target)
+        except (TypeError, ValueError):
+            current_target = None
+
+        if hvac_mode == HVACMode.OFF:
+            if current_mode == HVACMode.OFF:
+                return False
+            if current_target is not None and abs(current_target - temperature) < 0.1:
+                return False
+            return True
+
+        if current_mode != HVACMode.HEAT:
+            return True
+        if current_target is None:
+            return True
+        return abs(current_target - temperature) >= 0.1
+
     def _warn_no_trvs(self) -> None:
         now = dt_util.utcnow()
         if (
@@ -1070,13 +1097,26 @@ class VestaClimate(ClimateEntity, RestoreEntity):
                 self._retry_unsub()
                 self._retry_unsub = None
             if forced_off:
-                command = SetTrvModeAndTempCommand(
-                    valid_trvs,
-                    HVACMode.OFF,
-                    self._off_temp,
-                    self._valve_strategy,
-                )
-                await self._command_executor.execute(command, propagate=True)
+                trvs_to_update = [
+                    entity_id
+                    for entity_id in valid_trvs
+                    if self._trv_needs_update(
+                        entity_id, HVACMode.OFF, self._off_temp
+                    )
+                ]
+                if not trvs_to_update:
+                    _LOGGER.debug(
+                        "TRVs already off for %s; skipping OFF command",
+                        self._area_name,
+                    )
+                else:
+                    command = SetTrvModeAndTempCommand(
+                        trvs_to_update,
+                        HVACMode.OFF,
+                        self._off_temp,
+                        self._valve_strategy,
+                    )
+                    await self._command_executor.execute(command, propagate=True)
             elif target is not None:
                 send_target = target
                 if self._temp_sensors and self._current_temperature is not None:
@@ -1092,13 +1132,26 @@ class VestaClimate(ClimateEntity, RestoreEntity):
                         round(compensation.error, 2),
                         round(send_target, 2),
                     )
-                command = SetTrvModeAndTempCommand(
-                    valid_trvs,
-                    HVACMode.HEAT,
-                    send_target,
-                    self._valve_strategy,
-                )
-                await self._command_executor.execute(command, propagate=True)
+                trvs_to_update = [
+                    entity_id
+                    for entity_id in valid_trvs
+                    if self._trv_needs_update(
+                        entity_id, HVACMode.HEAT, send_target
+                    )
+                ]
+                if not trvs_to_update:
+                    _LOGGER.debug(
+                        "TRVs already at target for %s; skipping HEAT command",
+                        self._area_name,
+                    )
+                else:
+                    command = SetTrvModeAndTempCommand(
+                        trvs_to_update,
+                        HVACMode.HEAT,
+                        send_target,
+                        self._valve_strategy,
+                    )
+                    await self._command_executor.execute(command, propagate=True)
 
         await self._update_demand(target, immediate=immediate_demand)
         self.async_write_ha_state()
