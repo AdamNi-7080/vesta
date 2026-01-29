@@ -300,6 +300,7 @@ class PresenceManager(_BaseSensorManager):
             + self._distance_sensors
             + [self._guest_entity_id, self._home_entity_id]
         )
+        self._strategies = self._build_strategies()
         self._presence_on = False
 
     def tracked_entities(self) -> list[str]:
@@ -337,25 +338,64 @@ class PresenceManager(_BaseSensorManager):
     def _is_active_state(self, entity_id: str, state, context) -> bool:
         if not context["zone_home"]:
             return False
-        if entity_id in self._distance_sensors:
-            value = _state_to_float(state)
-            if value is None or not math.isfinite(value):
-                return False
-            hysteresis = 0.5 if context["previous"] else 0.0
-            return value < self._bermuda_threshold + hysteresis
-
-        if entity_id.startswith("binary_sensor."):
-            return state.state in (STATE_ON, STATE_HOME)
-        if state.state in (STATE_UNKNOWN, STATE_UNAVAILABLE):
+        strategy = self._strategies.get(entity_id)
+        if strategy is None:
             return False
-        state_value = str(state.state).casefold()
-        return state_value in (self._area_name.casefold(), self._slug.casefold())
+        return strategy.is_present(entity_id, state, context)
 
     def _set_active(self, active: bool, context) -> None:
         self._presence_on = active
 
     def _get_active(self) -> bool:
         return self._presence_on
+
+    def _build_strategies(self) -> dict[str, "PresenceDetectionStrategy"]:
+        strategies: dict[str, PresenceDetectionStrategy] = {}
+        proximity = ProximityPresenceStrategy(self._bermuda_threshold)
+        area_match = AreaPresenceStrategy(self._area_name, self._slug)
+        binary = BinaryPresenceStrategy()
+        for entity_id in self._distance_sensors:
+            strategies[entity_id] = proximity
+        for entity_id in self._presence_sensors:
+            if entity_id.startswith("binary_sensor."):
+                strategies[entity_id] = binary
+            else:
+                strategies[entity_id] = area_match
+        return strategies
+
+
+class PresenceDetectionStrategy:
+    def is_present(self, entity_id: str, state, context) -> bool:
+        raise NotImplementedError
+
+
+class BinaryPresenceStrategy(PresenceDetectionStrategy):
+    def is_present(self, entity_id: str, state, context) -> bool:
+        return state.state in (STATE_ON, STATE_HOME)
+
+
+class ProximityPresenceStrategy(PresenceDetectionStrategy):
+    def __init__(self, threshold: float) -> None:
+        self._threshold = threshold
+
+    def is_present(self, entity_id: str, state, context) -> bool:
+        value = _state_to_float(state)
+        if value is None or not math.isfinite(value):
+            return False
+        hysteresis = 0.5 if context["previous"] else 0.0
+        return value < self._threshold + hysteresis
+
+
+class AreaPresenceStrategy(PresenceDetectionStrategy):
+    def __init__(self, area_name: str, slug: str) -> None:
+        self._area_name = area_name.casefold()
+        self._slug = slug.casefold()
+
+    def is_present(self, entity_id: str, state, context) -> bool:
+        if state.state in (STATE_UNKNOWN, STATE_UNAVAILABLE):
+            return False
+        state_value = str(state.state).casefold()
+        return state_value in (self._area_name, self._slug)
 
 
 def _state_to_float(state) -> float | None:
