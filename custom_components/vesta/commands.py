@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from homeassistant.components.climate.const import (
@@ -205,6 +205,38 @@ def build_boiler_driver(
     return DomainBoilerDriver(entity_id, boost_temp, off_temp, domain)
 
 
+class ValveControlStrategy(Protocol):
+    async def apply(
+        self,
+        hass,
+        entity_ids: list[str],
+        hvac_mode: HVACMode,
+        temperature: float,
+    ) -> None: ...
+
+
+class StandardValveControlStrategy:
+    async def apply(
+        self,
+        hass,
+        entity_ids: list[str],
+        hvac_mode: HVACMode,
+        temperature: float,
+    ) -> None:
+        await hass.services.async_call(
+            "climate",
+            SERVICE_SET_HVAC_MODE,
+            {ATTR_ENTITY_ID: entity_ids, "hvac_mode": hvac_mode},
+            blocking=True,
+        )
+        await hass.services.async_call(
+            "climate",
+            SERVICE_SET_TEMPERATURE,
+            {ATTR_ENTITY_ID: entity_ids, ATTR_TEMPERATURE: temperature},
+            blocking=True,
+        )
+
+
 @dataclass(frozen=True)
 class TurnBoilerOnCommand:
     driver: BoilerDriver
@@ -232,6 +264,9 @@ class SetTrvModeAndTempCommand:
     entity_ids: list[str]
     hvac_mode: HVACMode
     temperature: float
+    strategy: ValveControlStrategy = field(
+        default_factory=StandardValveControlStrategy
+    )
 
     def summary(self) -> str:
         return f"{len(self.entity_ids)} -> {self.temperature}"
@@ -239,16 +274,10 @@ class SetTrvModeAndTempCommand:
     async def execute(self, hass) -> CommandResult:
         if not self.entity_ids:
             return CommandResult(True)
-        await hass.services.async_call(
-            "climate",
-            SERVICE_SET_HVAC_MODE,
-            {ATTR_ENTITY_ID: self.entity_ids, "hvac_mode": self.hvac_mode},
-            blocking=True,
-        )
-        await hass.services.async_call(
-            "climate",
-            SERVICE_SET_TEMPERATURE,
-            {ATTR_ENTITY_ID: self.entity_ids, ATTR_TEMPERATURE: self.temperature},
-            blocking=True,
+        await self.strategy.apply(
+            hass,
+            self.entity_ids,
+            self.hvac_mode,
+            self.temperature,
         )
         return CommandResult(True)

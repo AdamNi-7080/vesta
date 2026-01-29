@@ -35,7 +35,7 @@ from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.util import dt as dt_util
 
 from .calendar_handler import CalendarHandler, _parse_effective_at
-from .commands import SetTrvModeAndTempCommand
+from .commands import SetTrvModeAndTempCommand, StandardValveControlStrategy
 from .domain.climate import (
     calculate_temperature_compensation,
     compute_preheat_start,
@@ -224,6 +224,7 @@ class VestaClimate(ClimateEntity, RestoreEntity):
         self._schedule_entity_id = f"number.{self._slug}_schedule_target"
         self._coordinator = coordinator
         self._command_executor = coordinator.command_executor
+        self._valve_strategy = StandardValveControlStrategy()
         self._learning = learning
         self._weather_entity = config.get(CONF_WEATHER_ENTITY)
         self._calendar_entity = area.get("calendar_entity")
@@ -1007,7 +1008,10 @@ class VestaClimate(ClimateEntity, RestoreEntity):
                 self._retry_unsub = None
             if forced_off:
                 command = SetTrvModeAndTempCommand(
-                    valid_trvs, HVACMode.OFF, self._off_temp
+                    valid_trvs,
+                    HVACMode.OFF,
+                    self._off_temp,
+                    self._valve_strategy,
                 )
                 await self._command_executor.execute(command, propagate=True)
             elif target is not None:
@@ -1026,7 +1030,10 @@ class VestaClimate(ClimateEntity, RestoreEntity):
                         round(send_target, 2),
                     )
                 command = SetTrvModeAndTempCommand(
-                    valid_trvs, HVACMode.HEAT, send_target
+                    valid_trvs,
+                    HVACMode.HEAT,
+                    send_target,
+                    self._valve_strategy,
                 )
                 await self._command_executor.execute(command, propagate=True)
 
@@ -1040,7 +1047,9 @@ class VestaClimate(ClimateEntity, RestoreEntity):
         if not valid_trvs:
             self._warn_no_trvs()
             return
-        command = SetTrvModeAndTempCommand(valid_trvs, HVACMode.HEAT, temperature)
+        command = SetTrvModeAndTempCommand(
+            valid_trvs, HVACMode.HEAT, temperature, self._valve_strategy
+        )
         await self._command_executor.execute(command, propagate=True)
 
     async def _update_demand(
