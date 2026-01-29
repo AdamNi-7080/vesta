@@ -9,7 +9,12 @@ import inspect
 import logging
 from typing import Awaitable, Callable
 
-from homeassistant.const import STATE_OFF, STATE_UNAVAILABLE, STATE_UNKNOWN
+from homeassistant.const import (
+    STATE_OFF,
+    STATE_ON,
+    STATE_UNAVAILABLE,
+    STATE_UNKNOWN,
+)
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.event import async_call_later
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
@@ -292,6 +297,11 @@ class BoilerCoordinator(DataUpdateCoordinator):
                 )
                 await self._ensure_boiler_off(force=True)
                 return
+            elif master_state.state != STATE_ON:
+                _LOGGER.warning(
+                    "Master heating switch state %s is unexpected; defaulting to HEATING ENABLED",
+                    master_state.state,
+                )
 
             now = dt_util.utcnow()
             self._update_cooldown_state(now)

@@ -734,7 +734,17 @@ class VestaClimate(ClimateEntity, RestoreEntity):
 
     def _is_master_enabled(self) -> bool:
         state = self.hass.states.get(MASTER_SWITCH)
-        return state is None or state.state == STATE_ON
+        if state is None:
+            return True
+        if state.state in (STATE_ON, STATE_UNKNOWN, STATE_UNAVAILABLE):
+            return True
+        if state.state not in (STATE_OFF, STATE_ON):
+            _LOGGER.warning(
+                "Master heating switch state %s is unexpected; treating as ON",
+                state.state,
+            )
+            return True
+        return False
 
     def _is_forced_off(self) -> bool:
         if self._battery_lock:
